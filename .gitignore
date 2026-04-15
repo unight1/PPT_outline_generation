@@ -39,4 +39,7 @@ npm-debug.log*
 htmlcov/
 .pytest_cache/
 
+# 评测输出（D）
+reports/
+
 docs/others/
