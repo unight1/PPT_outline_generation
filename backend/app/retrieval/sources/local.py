@@ -3,8 +3,8 @@ from pathlib import Path
 from app.retrieval.interfaces import DocumentLoader
 from app.retrieval.types import DocumentChunk
 
-_CHUNK_SIZE = 500
-_CHUNK_OVERLAP = 100
+_CHUNK_SIZE = 800
+_CHUNK_OVERLAP = 150
 _SUPPORTED_EXTENSIONS = {".md", ".txt", ".pdf"}
 
 
