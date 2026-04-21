@@ -59,6 +59,8 @@ class CoreRetriever:
 
     async def _ensure_index(self) -> None:
         if self._index.is_built:
+            if self._chunks is None:
+                self._chunks = self._loader.load()
             return
         chunks = self._loader.load()
         texts = [c.content for c in chunks]
