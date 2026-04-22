@@ -10,6 +10,7 @@ from app.retrieval.embedding.fake import FakeEmbeddingProvider
 from app.retrieval.embedding.bge import BGEEmbeddingProvider
 from app.retrieval.index.chroma import ChromaVectorIndex
 from app.retrieval.reranker.fake import FakeReranker
+from app.retrieval.reranker.bge import BGEReranker
 
 __all__ = [
     "CoreRetriever",
@@ -40,7 +41,7 @@ def get_retriever(
         loader = LocalFileLoader(documents_dir) if documents_dir else LocalFileLoader(".")
         embedding =BGEEmbeddingProvider()
         index = ChromaVectorIndex(persist_dir=chroma_persist_dir)
-        reranker = FakeReranker()
+        reranker = BGEReranker()
         _retriever = CoreRetriever(
             loader=loader,
             embedding=embedding,
