@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     api_port: int = 8000
     database_url: str | None = None
     redis_url: str | None = None
+    use_real_llm: bool = False
+    llm_model: str = "deepseek-r1-671b"
+    llm_timeout_seconds: float = 45.0
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
 
 
 settings = Settings()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from app.task_store import get_task as db_get_task
 from app.task_store import save_task as db_save_task
 from app.task_store import store_available
+from app.services.generation import generate_outline, should_force_fail
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = logging.getLogger(__name__)
@@ -135,38 +136,6 @@ def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def stub_outline(depth: RetrievalDepth) -> dict[str, Any]:
-    generated_at = (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat()
-    return {
-        "title": "AI 时代的高效演示设计",
-        "slides": [
-            {
-                "slide_id": "s1",
-                "title": "背景与目标",
-                "bullets": [
-                    {"bullet_id": "s1-b1", "text": "为什么需要自动化生成 PPT", "evidence_ids": ["ev_1"]},
-                    {"bullet_id": "s1-b2", "text": "项目目标与受众收益", "evidence_ids": []},
-                ],
-                "speaker_notes": "先讲问题，再讲目标。",
-            }
-        ],
-        "evidence_catalog": [
-            {
-                "evidence_id": "ev_1",
-                "snippet": "知识工作者每周平均花费数小时整理演示材料。",
-                "source_id": "demo_source",
-                "locator": "段落 1",
-                "score": 0.8,
-                "confidence": 0.7,
-            }
-        ],
-        "meta": {
-            "retrieval_depth": depth.value,
-            "generated_at": generated_at,
-        },
-    }
-
-
 @router.post("", response_model=CreateTaskResponse, status_code=status.HTTP_201_CREATED)
 def create_task(payload: CreateTaskRequest) -> CreateTaskResponse:
     task_id = str(uuid4())
@@ -237,7 +206,7 @@ def complete_generation(task_id: str) -> None:
             return
 
         # Special marker to let evaluation scripts reliably cover failed status flow.
-        if "[FAIL]" in task["input"]["topic"]:
+        if should_force_fail(task["input"]["topic"]):
             task["status"] = TaskStatus.failed.value
             task["error"] = {
                 "code": "INTERNAL_ERROR",
@@ -249,7 +218,10 @@ def complete_generation(task_id: str) -> None:
             logger.warning("Task failed task_id=%s reason=test-marker", task_id)
             return
 
-        task["outline"] = stub_outline(RetrievalDepth(task["input"]["retrieval_depth"]))
+        task["outline"] = generate_outline(
+            topic=task["input"]["topic"],
+            retrieval_depth=task["input"]["retrieval_depth"],
+        )
         task["status"] = TaskStatus.done.value
         task["error"] = None
         task["updated_at"] = now_iso()
