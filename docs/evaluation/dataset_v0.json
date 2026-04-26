@@ -1,0 +1,16 @@
+[
+    {
+      "task_id": "eval_001",
+      "topic": "人工智能在医疗领域的应用",
+      "expected_depth": "L2",
+      "constraints": ["必须包含手术机器人案例", "至少 5 页内容"],
+      "priority": "high"
+    },
+    {
+      "task_id": "eval_002",
+      "topic": "未来十年低碳能源趋势",
+      "expected_depth": "L1",
+      "constraints": ["包含风能和太阳能对比"],
+      "priority": "medium"
+    }
+  ]
