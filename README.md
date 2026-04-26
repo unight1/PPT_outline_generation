@@ -20,6 +20,17 @@ copy .env.example .env
 
 （Linux / macOS：`cp .env.example .env`）
 
+如果你使用校内申请的 DeepSeek-R1-671B 接口，建议在 `.env` 里至少配置：
+
+```bash
+USE_REAL_LLM=true
+LLM_MODEL=deepseek-r1-671b
+OPENAI_API_KEY=my_key
+OPENAI_BASE_URL=<按学校接口文档/助教提供填写>
+```
+
+注意：`OPENAI_API_KEY` 不要提交到 Git。
+
 ### 2. 启动数据库（MySQL + Redis）
 
 在仓库根目录执行：
