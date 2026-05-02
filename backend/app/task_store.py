@@ -117,6 +117,69 @@ def get_task(task_id: str) -> dict[str, Any] | None:
     }
 
 
+def list_tasks_by_status(status: str, limit: int = 100) -> list[dict[str, Any]]:
+    engine = get_engine()
+    if engine is None:
+        return []
+    _ensure_table()
+    query_sql = """
+    SELECT task_id, status, created_at, updated_at, input_json, clarification_json, outline_json, error_json
+    FROM tasks
+    WHERE status = :status
+    ORDER BY updated_at DESC
+    LIMIT :limit
+    """
+    with engine.begin() as conn:
+        rows = conn.execute(text(query_sql), {"status": status, "limit": limit}).mappings().all()
+
+    tasks: list[dict[str, Any]] = []
+    for row in rows:
+        tasks.append(
+            {
+                "task_id": row["task_id"],
+                "status": row["status"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "input": _deserialize(row["input_json"]),
+                "clarification": _deserialize(row["clarification_json"]),
+                "outline": _deserialize(row["outline_json"]),
+                "error": _deserialize(row["error_json"]),
+            }
+        )
+    return tasks
+
+
+def list_tasks(limit: int = 200) -> list[dict[str, Any]]:
+    engine = get_engine()
+    if engine is None:
+        return []
+    _ensure_table()
+    query_sql = """
+    SELECT task_id, status, created_at, updated_at, input_json, clarification_json, outline_json, error_json
+    FROM tasks
+    ORDER BY updated_at DESC
+    LIMIT :limit
+    """
+    with engine.begin() as conn:
+        rows = conn.execute(text(query_sql), {"limit": limit}).mappings().all()
+
+    tasks: list[dict[str, Any]] = []
+    for row in rows:
+        tasks.append(
+            {
+                "task_id": row["task_id"],
+                "status": row["status"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "input": _deserialize(row["input_json"]),
+                "clarification": _deserialize(row["clarification_json"]),
+                "outline": _deserialize(row["outline_json"]),
+                "error": _deserialize(row["error_json"]),
+            }
+        )
+    return tasks
+
+
 def store_available() -> bool:
     # Route layer decides fallback behavior based on this check.
     available = get_engine() is not None
