@@ -45,6 +45,7 @@ def build_stub_outline(retrieval_depth: str) -> dict[str, Any]:
             "retrieval_depth": retrieval_depth,
             "generated_at": generated_at,
             "mode": "fake",
+            "schema_version": settings.outline_schema_version,
         },
     }
 
@@ -175,6 +176,7 @@ def _normalize_outline(raw: dict[str, Any], retrieval_depth: str) -> dict[str, A
             "generated_at": now,
             "mode": "real",
             "model": settings.llm_model,
+            "schema_version": settings.outline_schema_version,
         },
     }
 

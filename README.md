@@ -76,6 +76,11 @@ npm run dev
 | `docs/` | 项目说明与初步系统设计 |
 | `docker-compose.yml` | 仅数据库与缓存（应用本地运行，便于调试） |
 
+## 联调必读
+
+- 接口与数据结构契约：`docs/api_contract_v0.md`
+- 任务状态流转说明：`docs/management/task_state_flow.md`
+
 ## 下一步开发建议
 
 - 在 `backend/app/api/routes/` 增加任务、生成等接口

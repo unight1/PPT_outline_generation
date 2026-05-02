@@ -7,10 +7,18 @@ from app.retrieval.types import (
 from app.retrieval.retriever import CoreRetriever
 from app.retrieval.sources.local import LocalFileLoader
 from app.retrieval.embedding.fake import FakeEmbeddingProvider
-from app.retrieval.embedding.bge import BGEEmbeddingProvider
 from app.retrieval.index.chroma import ChromaVectorIndex
 from app.retrieval.reranker.fake import FakeReranker
-from app.retrieval.reranker.bge import BGEReranker
+
+try:
+    from app.retrieval.embedding.bge import BGEEmbeddingProvider
+except Exception:  # pragma: no cover - environment dependent
+    BGEEmbeddingProvider = None  # type: ignore[assignment]
+
+try:
+    from app.retrieval.reranker.bge import BGEReranker
+except Exception:  # pragma: no cover - environment dependent
+    BGEReranker = None  # type: ignore[assignment]
 
 __all__ = [
     "CoreRetriever",
@@ -39,9 +47,15 @@ def get_retriever(
     global _retriever
     if _retriever is None:
         loader = LocalFileLoader(documents_dir) if documents_dir else LocalFileLoader(".")
-        embedding =BGEEmbeddingProvider()
+        if BGEEmbeddingProvider is not None:
+            embedding = BGEEmbeddingProvider()
+        else:
+            embedding = FakeEmbeddingProvider(dimension=embedding_dimension)
         index = ChromaVectorIndex(persist_dir=chroma_persist_dir)
-        reranker = BGEReranker()
+        if BGEReranker is not None:
+            reranker = BGEReranker()
+        else:
+            reranker = FakeReranker()
         _retriever = CoreRetriever(
             loader=loader,
             embedding=embedding,
