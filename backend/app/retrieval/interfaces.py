@@ -57,3 +57,11 @@ class Reranker(ABC):
         self, query: str, hits: list[RetrievalHit], top_k: int
     ) -> list[RetrievalHit]:
         ...
+
+
+class WebSearchProvider(ABC):
+    """外部网络搜索提供者抽象基类。"""
+
+    @abstractmethod
+    def search(self, query: str, max_results: int) -> list[RetrievalHit]:
+        ...
