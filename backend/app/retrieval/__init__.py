@@ -20,6 +20,11 @@ try:
 except Exception:  # pragma: no cover - environment dependent
     BGEReranker = None  # type: ignore[assignment]
 
+try:
+    from app.retrieval.sources.tavily import TavilySearchProvider
+except Exception:  # pragma: no cover - environment dependent
+    TavilySearchProvider = None  # type: ignore[assignment]
+
 __all__ = [
     "CoreRetriever",
     "RetrievalDepth",
@@ -36,6 +41,7 @@ def get_retriever(
     documents_dir: str = "",
     embedding_dimension: int = 128,
     chroma_persist_dir: str = "./chroma_data",
+    tavily_api_key: str = "",
 ) -> CoreRetriever:
     """获取或创建单例 CoreRetriever。
 
@@ -43,6 +49,7 @@ def get_retriever(
         documents_dir: 文档目录路径。
         embedding_dimension: 向量维度。
         chroma_persist_dir: ChromaDB 持久化目录。
+        tavily_api_key: Tavily API Key，为空则不启用网络搜索。
     """
     global _retriever
     if _retriever is None:
@@ -56,10 +63,16 @@ def get_retriever(
             reranker = BGEReranker()
         else:
             reranker = FakeReranker()
+
+        web_search = None
+        if tavily_api_key and TavilySearchProvider is not None:
+            web_search = TavilySearchProvider(api_key=tavily_api_key)
+
         _retriever = CoreRetriever(
             loader=loader,
             embedding=embedding,
             index=index,
             reranker=reranker,
+            web_search=web_search,
         )
     return _retriever

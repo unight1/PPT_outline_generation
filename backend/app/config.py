@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     retrieval_min_evidence_per_slide: int = 1
     retrieval_min_quality_score: float = 0.45
     retrieval_enable_fallback_deepen: bool = True
+    tavily_api_key: str | None = None
 
 
 settings = Settings()
