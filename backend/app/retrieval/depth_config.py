@@ -12,6 +12,8 @@ class DepthProfile:
     rerank_top_k: int
     timeout_seconds: float
     min_score_threshold: float
+    enable_web_search: bool = False
+    web_search_max_results: int = 5
 
 
 DEPTH_PROFILES: dict[RetrievalDepth, DepthProfile] = {
@@ -21,6 +23,8 @@ DEPTH_PROFILES: dict[RetrievalDepth, DepthProfile] = {
         rerank_top_k=5,
         timeout_seconds=5.0,
         min_score_threshold=0.3,
+        enable_web_search=False,
+        web_search_max_results=3,
     ),
     RetrievalDepth.L1: DepthProfile(
         max_recall=15,
@@ -28,6 +32,8 @@ DEPTH_PROFILES: dict[RetrievalDepth, DepthProfile] = {
         rerank_top_k=10,
         timeout_seconds=10.0,
         min_score_threshold=0.2,
+        enable_web_search=True,
+        web_search_max_results=5,
     ),
     RetrievalDepth.L2: DepthProfile(
         max_recall=30,
@@ -35,6 +41,8 @@ DEPTH_PROFILES: dict[RetrievalDepth, DepthProfile] = {
         rerank_top_k=10,
         timeout_seconds=20.0,
         min_score_threshold=0.1,
+        enable_web_search=True,
+        web_search_max_results=8,
     ),
 }
 
