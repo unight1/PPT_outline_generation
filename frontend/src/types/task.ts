@@ -9,11 +9,14 @@ export type RetrievalDepth = 'L0' | 'L1' | 'L2'
 
 export interface CreateTaskRequest {
   topic: string
+  source_type?: 'short_topic' | 'long_document'
   audience?: string
   duration_minutes?: number
   language?: string
   retrieval_depth?: RetrievalDepth
   raw_notes?: string
+  document_text?: string
+  document_title?: string
 }
 
 export interface CreateTaskResponse {

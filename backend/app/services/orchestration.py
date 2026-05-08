@@ -1,11 +1,60 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from app.config import settings
 from app.retrieval import RetrievalDepth, RetrievalRequest, get_retriever
 from app.services.generation import generate_outline
+
+
+def _infer_target_pages(
+    clarification: dict[str, Any] | None,
+    raw_notes: str | None,
+) -> int:
+    default_pages = 8
+    hints: list[str] = []
+    if isinstance(raw_notes, str):
+        hints.append(raw_notes)
+    if clarification and isinstance(clarification, dict):
+        questions = clarification.get("questions", [])
+        if isinstance(questions, list):
+            for item in questions:
+                if not isinstance(item, dict):
+                    continue
+                prompt = str(item.get("prompt") or "")
+                answer = str(item.get("answer") or "")
+                if "页" in prompt or "page" in prompt.lower():
+                    hints.append(answer)
+                else:
+                    hints.append(answer)
+
+    for text in hints:
+        if not text:
+            continue
+        range_match = re.search(r"(\d{1,2})\s*[-~—]\s*(\d{1,2})", text)
+        if range_match:
+            low = int(range_match.group(1))
+            high = int(range_match.group(2))
+            return max(5, min(20, (low + high) // 2))
+        single_match = re.search(r"(\d{1,2})\s*(?:页|pages?)", text, flags=re.IGNORECASE)
+        if single_match:
+            return max(5, min(20, int(single_match.group(1))))
+    return default_pages
+
+
+def _normalize_depth(value: Any) -> str:
+    if isinstance(value, str):
+        upper = value.upper().strip()
+        if upper in ("L0", "L1", "L2"):
+            return upper
+    enum_value = getattr(value, "value", None)
+    if isinstance(enum_value, str):
+        upper = enum_value.upper().strip()
+        if upper in ("L0", "L1", "L2"):
+            return upper
+    return "L1"
 
 
 def _build_retrieval_query(topic: str, slide_title: str, clarification_text: str) -> str:
@@ -61,7 +110,6 @@ def _summarize_document_text(document_text: str | None) -> str:
     text = (document_text or "").strip()
     if not text:
         return ""
-    # Keep a deterministic lightweight summary to avoid adding another LLM call at this stage.
     compact = " ".join(text.split())
     return compact[:1500]
 
@@ -232,6 +280,8 @@ def generate_outline_with_research(
     document_title: str | None = None,
     document_summary: str | None = None,
 ) -> dict[str, Any]:
+    retrieval_depth = _normalize_depth(retrieval_depth)
+    target_pages = _infer_target_pages(clarification=clarification, raw_notes=raw_notes)
     generation_seed = _build_generation_seed(
         topic=topic,
         source_type=source_type,
@@ -240,7 +290,7 @@ def generate_outline_with_research(
         raw_notes=raw_notes,
         document_summary=document_summary,
     )
-    outline = generate_outline(topic=generation_seed, retrieval_depth=retrieval_depth)
+    outline = generate_outline(topic=generation_seed, retrieval_depth=retrieval_depth, target_pages=target_pages)
     if not _should_retrieve(retrieval_depth=retrieval_depth, clarification=clarification, raw_notes=raw_notes):
         return outline
 
@@ -274,15 +324,4 @@ def generate_outline_with_research(
         retrieval_by_slide=retrieval_by_slide,
         min_evidence_per_slide=min_evidence_per_slide,
     )
-    meta = enriched.get("meta", {})
-    if isinstance(meta, dict):
-        meta["source_type"] = source_type
-        if source_type == "long_document":
-            meta["document_mode"] = "summary_seeded"
-        meta["retrieval_strategy"] = {
-            "min_quality_score": min_quality_score,
-            "min_evidence_per_slide": min_evidence_per_slide,
-            "fallback_deepen": bool(settings.retrieval_enable_fallback_deepen),
-        }
-        enriched["meta"] = meta
     return enriched

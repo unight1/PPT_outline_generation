@@ -15,22 +15,37 @@ def should_force_fail(topic: str) -> bool:
     return "[FAIL]" in topic
 
 
-def build_stub_outline(retrieval_depth: str) -> dict[str, Any]:
+def build_stub_outline(retrieval_depth: str, target_pages: int = 5) -> dict[str, Any]:
     """Temporary outline generator. Later replaced by real LLM pipeline."""
     generated_at = (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat()
+    slides = [
+        {
+            "slide_id": "s1",
+            "title": "背景与目标",
+            "bullets": [
+                {"bullet_id": "s1-b1", "text": "为什么需要自动化生成 PPT", "evidence_ids": ["ev_1"]},
+                {"bullet_id": "s1-b2", "text": "项目目标与受众收益", "evidence_ids": []},
+            ],
+            "speaker_notes": "先讲问题，再讲目标。",
+        }
+    ]
+    while len(slides) < max(5, target_pages):
+        idx = len(slides) + 1
+        slides.append(
+            {
+                "slide_id": f"s{idx}",
+                "title": f"第{idx}页核心内容",
+                "bullets": [
+                    {"bullet_id": f"s{idx}-b1", "text": "关键结论与价值说明", "evidence_ids": []},
+                    {"bullet_id": f"s{idx}-b2", "text": "支撑逻辑与下一步动作", "evidence_ids": []},
+                ],
+                "speaker_notes": "说明该页核心结论，并衔接下一页。",
+            }
+        )
+
     return {
         "title": "AI 时代的高效演示设计",
-        "slides": [
-            {
-                "slide_id": "s1",
-                "title": "背景与目标",
-                "bullets": [
-                    {"bullet_id": "s1-b1", "text": "为什么需要自动化生成 PPT", "evidence_ids": ["ev_1"]},
-                    {"bullet_id": "s1-b2", "text": "项目目标与受众收益", "evidence_ids": []},
-                ],
-                "speaker_notes": "先讲问题，再讲目标。",
-            }
-        ],
+        "slides": slides,
         "evidence_catalog": [
             {
                 "evidence_id": "ev_1",
@@ -50,9 +65,10 @@ def build_stub_outline(retrieval_depth: str) -> dict[str, Any]:
     }
 
 
-def _outline_prompt(topic: str, retrieval_depth: str) -> str:
+def _outline_prompt(topic: str, retrieval_depth: str, target_pages: int) -> str:
     return f"""
-你是一个PPT大纲助手。请只输出一个JSON对象，且必须符合以下结构：
+你是一个资深咨询顾问风格的PPT内容策划助手。请生成“可直接讲述”的高质量初稿，而不是空泛提纲。
+请只输出一个JSON对象，且必须符合以下结构：
 {{
   "title": "string",
   "slides": [
@@ -86,11 +102,20 @@ def _outline_prompt(topic: str, retrieval_depth: str) -> str:
 }}
 
 硬性要求：
-1) slides 至少 5 页；
+1) slides 必须为 {max(5, target_pages)} 页，不多不少；
 2) 内容应包含引言/主体/结论逻辑；
-3) 每页至少 2 个 bullet；
-4) 若没有可靠证据，可让 evidence_catalog 为空数组，并将 bullets 中 evidence_ids 设为空数组；
-5) 不要输出 Markdown，不要输出解释文字，只输出 JSON。
+3) 每页建议 3-5 个 bullet，且 bullet 文本必须具体，避免“待补充/进一步分析”等空话；
+4) bullet 要覆盖：关键结论、原因/机制、可执行动作、风险或边界（按页选择）；
+5) 每页 speaker_notes 必须是 2-4 句可讲述话术，说明“这页要讲什么、怎么过渡到下一页”；
+6) 至少 2 页包含“数据/案例/对比”类型要点（可用行业通用范围表达，避免编造精确不可验证数字）；
+7) evidence_catalog 优先给出可追溯证据；若没有可靠证据，可为空数组，但 bullets 中 evidence_ids 需保持为空数组；
+8) 页面标题要有信息量，不要仅写“背景/方案/总结”这类过泛词，建议写成“结论+对象”形式；
+9) 不要输出 Markdown，不要输出解释文字，只输出 JSON。
+
+质量偏好（重要）：
+- 用语简洁、专业、可讲，避免口号式表述。
+- 各页之间要有递进：问题定义 -> 分析框架 -> 方案设计 -> 落地计划 -> 风险与结论。
+- 若主题偏技术，优先加入“架构、流程、权衡、指标”；若偏业务，优先加入“目标、路径、收益、风险”。
 
 用户主题：{topic}
 """.strip()
@@ -105,7 +130,7 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
-def _normalize_outline(raw: dict[str, Any], retrieval_depth: str) -> dict[str, Any]:
+def _normalize_outline(raw: dict[str, Any], retrieval_depth: str, target_pages: int) -> dict[str, Any]:
     slides_in = raw.get("slides", []) if isinstance(raw.get("slides", []), list) else []
     slides: list[dict[str, Any]] = []
     for idx, slide in enumerate(slides_in[:20], start=1):
@@ -136,7 +161,8 @@ def _normalize_outline(raw: dict[str, Any], retrieval_depth: str) -> dict[str, A
             }
         )
 
-    while len(slides) < 5:
+    desired_pages = max(5, int(target_pages))
+    while len(slides) < desired_pages:
         idx = len(slides) + 1
         slides.append(
             {
@@ -207,7 +233,7 @@ def _extract_json_object(content: str) -> dict[str, Any]:
     raise RuntimeError("LLM output is not a JSON object.")
 
 
-def build_real_outline(topic: str, retrieval_depth: str) -> dict[str, Any]:
+def build_real_outline(topic: str, retrieval_depth: str, target_pages: int = 5) -> dict[str, Any]:
     """Generate outline via real LLM call and normalize output shape."""
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is required when USE_REAL_LLM=true.")
@@ -221,7 +247,14 @@ def build_real_outline(topic: str, retrieval_depth: str) -> dict[str, Any]:
         "model": settings.llm_model,
         "messages": [
             {"role": "system", "content": "你是严谨的JSON生成器。"},
-            {"role": "user", "content": _outline_prompt(topic=topic, retrieval_depth=retrieval_depth)},
+            {
+                "role": "user",
+                "content": _outline_prompt(
+                    topic=topic,
+                    retrieval_depth=retrieval_depth,
+                    target_pages=target_pages,
+                ),
+            },
         ],
         "temperature": 0.3,
         "timeout": settings.llm_timeout_seconds,
@@ -235,10 +268,10 @@ def build_real_outline(topic: str, retrieval_depth: str) -> dict[str, Any]:
 
     content = response.choices[0].message.content or "{}"
     raw = _extract_json_object(content)
-    return _normalize_outline(raw=raw, retrieval_depth=retrieval_depth)
+    return _normalize_outline(raw=raw, retrieval_depth=retrieval_depth, target_pages=target_pages)
 
 
-def generate_outline(topic: str, retrieval_depth: str) -> dict[str, Any]:
+def generate_outline(topic: str, retrieval_depth: str, target_pages: int = 5) -> dict[str, Any]:
     if settings.use_real_llm:
-        return build_real_outline(topic=topic, retrieval_depth=retrieval_depth)
-    return build_stub_outline(retrieval_depth=retrieval_depth)
+        return build_real_outline(topic=topic, retrieval_depth=retrieval_depth, target_pages=target_pages)
+    return build_stub_outline(retrieval_depth=retrieval_depth, target_pages=target_pages)

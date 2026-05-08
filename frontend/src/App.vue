@@ -6,7 +6,8 @@ import {
   generateOutline,
   getTask,
   submitClarification,
-} from './api/mockApi'
+  apiModeLabel,
+} from './api'
 
 type ViewName = 'form' | 'status' | 'result'
 
@@ -17,11 +18,14 @@ const task = ref<Task | null>(null)
 
 const form = reactive<CreateTaskRequest>({
   topic: '',
+  source_type: 'short_topic',
   audience: '',
   duration_minutes: 15,
   language: 'zh',
   retrieval_depth: 'L1',
   raw_notes: '',
+  document_title: '',
+  document_text: '',
 })
 
 const answers = reactive<Record<string, string>>({})
@@ -49,6 +53,11 @@ function validateForm() {
     (form.duration_minutes < 5 || form.duration_minutes > 120)
   ) {
     errorMessage.value = '演示时长建议在 5 到 120 分钟之间'
+    return false
+  }
+
+  if (form.source_type === 'long_document' && !(form.document_text ?? '').trim()) {
+    errorMessage.value = '选择“长文档”时，需填写文档正文'
     return false
   }
 
@@ -100,22 +109,36 @@ async function handleGenerate() {
 
   try {
     task.value = await generateOutline(task.value.task_id)
+    const pollStart = Date.now()
+    const maxPollMs = 3 * 60 * 1000
 
-    const timer = window.setInterval(async () => {
+    const timer = window.setInterval(() => {
       if (!task.value) return
 
-      const latestTask = await getTask(task.value.task_id)
-      task.value = latestTask
+      void (async () => {
+        try {
+          const latestTask = await getTask(task.value!.task_id)
+          task.value = latestTask
 
-      if (latestTask.status === 'done' || latestTask.status === 'failed') {
-        window.clearInterval(timer)
-        loading.value = false
+          if (latestTask.status === 'done' || latestTask.status === 'failed') {
+            window.clearInterval(timer)
+            loading.value = false
 
-        if (latestTask.status === 'done') {
-          view.value = 'result'
+            if (latestTask.status === 'done') {
+              view.value = 'result'
+            }
+          } else if (Date.now() - pollStart > maxPollMs) {
+            window.clearInterval(timer)
+            loading.value = false
+            errorMessage.value = '轮询超时，请稍后刷新任务状态。'
+          }
+        } catch (error) {
+          window.clearInterval(timer)
+          loading.value = false
+          errorMessage.value = error instanceof Error ? error.message : '轮询任务状态失败'
         }
-      }
-    }, 1000)
+      })()
+    }, 1200)
   } catch (error) {
     loading.value = false
     errorMessage.value = error instanceof Error ? error.message : '生成失败'
@@ -127,11 +150,14 @@ function restart() {
   task.value = null
   errorMessage.value = ''
   form.topic = ''
+  form.source_type = 'short_topic'
   form.audience = ''
   form.duration_minutes = 15
   form.language = 'zh'
   form.retrieval_depth = 'L1'
   form.raw_notes = ''
+  form.document_title = ''
+  form.document_text = ''
 }
 </script>
 
@@ -141,7 +167,7 @@ function restart() {
       <p class="eyebrow">PPT Outline Generation</p>
       <h1>智能 PPT 大纲生成前端 Demo</h1>
       <p class="subtitle">
-        第 3–4 周 C 任务：需求澄清 → 任务状态 → 大纲结果展示。当前使用 Mock 数据，不依赖真实后端。
+        第 3–4 周 C 任务：需求澄清 -> 任务状态 -> 大纲结果展示。当前接口模式：{{ apiModeLabel }}。
       </p>
     </section>
 
@@ -159,6 +185,14 @@ function restart() {
       <label>
         PPT 主题 <span class="required">*</span>
         <input v-model="form.topic" placeholder="例如：基于 RAG 的 PPT 大纲智能生成系统" />
+      </label>
+
+      <label>
+        输入类型
+        <select v-model="form.source_type">
+          <option value="short_topic">短主题</option>
+          <option value="long_document">长文档</option>
+        </select>
       </label>
 
       <label>
@@ -187,6 +221,21 @@ function restart() {
           placeholder="可以粘贴老师要求、参考资料、你已有的想法"
         />
       </label>
+
+      <template v-if="form.source_type === 'long_document'">
+        <label>
+          文档标题（可选）
+          <input v-model="form.document_title" placeholder="例如：RAG 在教学场景中的应用研究" />
+        </label>
+
+        <label>
+          文档正文 <span class="required">*</span>
+          <textarea
+            v-model="form.document_text"
+            placeholder="请粘贴长文档正文，后端将用于提炼重点与生成大纲"
+          />
+        </label>
+      </template>
 
       <button :disabled="loading" @click="handleCreateTask">
         {{ loading ? '创建中...' : '创建任务' }}
@@ -226,7 +275,7 @@ function restart() {
       </div>
 
       <p v-if="task.status === 'generating'" class="hint">
-        Mock 模式下会模拟轮询，约几次轮询后自动进入完成状态。
+        正在轮询后端任务状态，通常在数十秒到数分钟内完成（视模型与检索耗时而定）。
       </p>
     </section>
 
