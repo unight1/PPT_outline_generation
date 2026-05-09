@@ -8,9 +8,11 @@ from app.retrieval import get_retriever, RetrievalRequest, RetrievalDepth
 
 async def main():
     # 传入文档目录和 ChromaDB 持久化路径，创建检索器（单例）
+    # tavily_api_key 可选，传入后 L1/L2 深度会同时进行本地检索和网络搜索
     retriever = get_retriever(
         documents_dir="./sample_docs",
         chroma_persist_dir="./chroma_data",
+        tavily_api_key="tvly-xxx",  # 可选，为空则仅使用本地检索
     )
 
     # 构造请求
@@ -37,16 +39,45 @@ asyncio.run(main())
 
 ```bash
 cd backend
-uv run python -m app.retrieval.cli <文档目录> <查询关键词>
+# 基本用法
+python -m app.retrieval.cli "查询关键词" --docs <文档目录>
+
+# 启用网络搜索
+python -m app.retrieval.cli "AI in education" --depth L1 --web --tavily-key tvly-xxx
 ```
 
 ## 深度档位说明
 
-| 档位 | 召回数 | 重排序 | 超时 | 适用场景 |
-|------|--------|--------|------|----------|
-| `L0` | 5 | 否 | 5s | 快速预览，低延迟 |
-| `L1` | 15 | 否 | 10s | 默认平衡模式 |
-| `L2` | 30 | 是 | 20s | 深度检索，高质量要求 |
+| 档位 | 召回数 | 重排序 | 网络搜索 | Web 条数 | 超时 | 适用场景 |
+|------|--------|--------|----------|----------|------|----------|
+| `L0` | 5 | 否 | 否 | - | 5s | 快速预览，低延迟 |
+| `L1` | 15 | 否 | 是 | 5 | 10s | 默认平衡模式 |
+| `L2` | 30 | 是 | 是 | 8 | 20s | 深度检索，高质量要求 |
+
+## 网络搜索（Tavily）
+
+当传入 `tavily_api_key` 时，L1/L2 深度会并行执行本地向量检索和 Tavily 网络搜索，结果合并后返回。未传入 key 时自动降级为纯本地检索。
+
+网络搜索结果在 `RetrievalHit` 中的字段映射：
+
+| RetrievalHit 字段 | Tavily 字段 |
+|-------------------|-------------|
+| `snippet` | `content` |
+| `source_id` | `url` |
+| `locator` | `title` |
+| `score` | `score` |
+
+可通过 `source_id` 是否以 `http` 开头区分本地和网络来源。Tavily 调用失败时会静默降级，不影响本地检索。
+
+### 配置方式
+
+三选一，优先级从高到低：
+
+1. **代码传参**：`get_retriever(tavily_api_key="tvly-xxx")`
+2. **系统环境变量**：`export TAVILY_API_KEY=tvly-xxx`
+3. **.env 文件**：在项目根目录或 `backend/` 下创建 `.env`，写入 `TAVILY_API_KEY=tvly-xxx`
+
+免费额度：每月 1000 次请求，注册地址 https://tavily.com
 
 ## RetrievalHit 字段
 
@@ -62,5 +93,5 @@ uv run python -m app.retrieval.cli <文档目录> <查询关键词>
 
 ```bash
 cd backend
-uv run pytest tests/test_retrieval/ -v
+pytest tests/test_retrieval/ -v
 ```

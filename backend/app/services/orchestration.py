@@ -154,6 +154,7 @@ def _retrieve_for_slides(
     retriever = get_retriever(
         documents_dir=settings.retrieval_documents_dir,
         chroma_persist_dir=settings.retrieval_chroma_dir,
+        tavily_api_key=settings.tavily_api_key or "",
     )
     clarification_text = _clarification_text(clarification)
 
