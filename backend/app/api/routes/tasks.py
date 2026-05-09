@@ -470,12 +470,26 @@ def complete_generation(task_id: str) -> None:
             task["runtime"] = runtime
             error_code, error_message, error_details = classify_generation_exception(exc)
             if attempts < max_retries:
-                task["status"] = TaskStatus.pending.value
+                # Auto-retry in background with bounded attempts; avoid getting stuck in pending.
+                next_attempt = attempts + 1
+                runtime["generation_attempts"] = next_attempt
+                runtime["last_started_at"] = now_iso()
+                task["status"] = TaskStatus.generating.value
                 task["error"] = {
                     "code": error_code,
-                    "message": f"{error_message} Retry is allowed.",
-                    "details": {**error_details, "attempts": attempts, "max_retries": max_retries},
+                    "message": f"{error_message} Auto retry scheduled.",
+                    "details": {
+                        **error_details,
+                        "attempts": attempts,
+                        "next_attempt": next_attempt,
+                        "max_retries": max_retries,
+                    },
                 }
+                task["runtime"] = runtime
+                task["updated_at"] = now_iso()
+                persist_task(task)
+                enqueue_generation(task_id)
+                return
             else:
                 task["status"] = TaskStatus.failed.value
                 task["error"] = {

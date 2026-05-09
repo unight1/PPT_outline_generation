@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 45.0
     openai_api_key: str | None = None
     openai_base_url: str | None = None
+    tavily_api_key: str | None = None
     retrieval_documents_dir: str = "sample_docs"
     retrieval_chroma_dir: str = "./chroma_data"
     generation_worker_max_workers: int = 2
@@ -41,7 +42,6 @@ class Settings(BaseSettings):
     retrieval_min_evidence_per_slide: int = 1
     retrieval_min_quality_score: float = 0.45
     retrieval_enable_fallback_deepen: bool = True
-    tavily_api_key: str | None = None
 
 
 settings = Settings()

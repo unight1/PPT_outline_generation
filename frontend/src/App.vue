@@ -110,12 +110,15 @@ async function handleGenerate() {
   try {
     task.value = await generateOutline(task.value.task_id)
     const pollStart = Date.now()
-    const maxPollMs = 3 * 60 * 1000
+    const maxPollMs = 15 * 60 * 1000
+    let pollingInFlight = false
 
     const timer = window.setInterval(() => {
       if (!task.value) return
+      if (pollingInFlight) return
 
       void (async () => {
+        pollingInFlight = true
         try {
           const latestTask = await getTask(task.value!.task_id)
           task.value = latestTask
@@ -130,12 +133,14 @@ async function handleGenerate() {
           } else if (Date.now() - pollStart > maxPollMs) {
             window.clearInterval(timer)
             loading.value = false
-            errorMessage.value = '轮询超时，请稍后刷新任务状态。'
+            errorMessage.value = `轮询超时（当前状态：${latestTask.status}），请稍后刷新任务状态。`
           }
         } catch (error) {
           window.clearInterval(timer)
           loading.value = false
           errorMessage.value = error instanceof Error ? error.message : '轮询任务状态失败'
+        } finally {
+          pollingInFlight = false
         }
       })()
     }, 1200)

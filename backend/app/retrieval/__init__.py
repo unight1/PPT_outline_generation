@@ -9,6 +9,7 @@ from app.retrieval.sources.local import LocalFileLoader
 from app.retrieval.embedding.fake import FakeEmbeddingProvider
 from app.retrieval.index.chroma import ChromaVectorIndex
 from app.retrieval.reranker.fake import FakeReranker
+from app.retrieval.sources.tavily import TavilySearchProvider
 
 try:
     from app.retrieval.embedding.bge import BGEEmbeddingProvider
@@ -20,11 +21,6 @@ try:
 except Exception:  # pragma: no cover - environment dependent
     BGEReranker = None  # type: ignore[assignment]
 
-try:
-    from app.retrieval.sources.tavily import TavilySearchProvider
-except Exception:  # pragma: no cover - environment dependent
-    TavilySearchProvider = None  # type: ignore[assignment]
-
 __all__ = [
     "CoreRetriever",
     "RetrievalDepth",
@@ -35,6 +31,7 @@ __all__ = [
 ]
 
 _retriever: CoreRetriever | None = None
+_retriever_config: tuple[str, str, str] | None = None
 
 
 def get_retriever(
@@ -49,10 +46,15 @@ def get_retriever(
         documents_dir: 文档目录路径。
         embedding_dimension: 向量维度。
         chroma_persist_dir: ChromaDB 持久化目录。
-        tavily_api_key: Tavily API Key，为空则不启用网络搜索。
     """
-    global _retriever
-    if _retriever is None:
+    global _retriever, _retriever_config
+    normalized_docs_dir = documents_dir or "."
+    normalized_chroma_dir = chroma_persist_dir or "./chroma_data"
+    normalized_tavily_key = tavily_api_key or ""
+    current_config = (normalized_docs_dir, normalized_chroma_dir, normalized_tavily_key)
+
+    # Rebuild singleton when retrieval inputs change (especially Tavily key enable/disable).
+    if _retriever is None or _retriever_config != current_config:
         loader = LocalFileLoader(documents_dir) if documents_dir else LocalFileLoader(".")
         if BGEEmbeddingProvider is not None:
             embedding = BGEEmbeddingProvider()
@@ -63,11 +65,7 @@ def get_retriever(
             reranker = BGEReranker()
         else:
             reranker = FakeReranker()
-
-        web_search = None
-        if tavily_api_key and TavilySearchProvider is not None:
-            web_search = TavilySearchProvider(api_key=tavily_api_key)
-
+        web_search = TavilySearchProvider(normalized_tavily_key) if normalized_tavily_key else None
         _retriever = CoreRetriever(
             loader=loader,
             embedding=embedding,
@@ -75,4 +73,5 @@ def get_retriever(
             reranker=reranker,
             web_search=web_search,
         )
+        _retriever_config = current_config
     return _retriever

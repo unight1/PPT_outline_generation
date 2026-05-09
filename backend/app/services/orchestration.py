@@ -86,6 +86,27 @@ def _next_depth(retrieval_depth: str) -> str:
     return "L2"
 
 
+def _default_slide_titles(target_pages: int) -> list[str]:
+    """Deterministic slide goals used before grounded generation."""
+    base = [
+        "问题背景与目标",
+        "现状分析与关键挑战",
+        "方案设计与核心路径",
+        "实施计划与里程碑",
+        "风险边界与应对策略",
+        "投入产出与预期收益",
+        "组织协同与落地保障",
+        "结论与下一步行动",
+    ]
+    pages = max(5, min(20, int(target_pages)))
+    if pages <= len(base):
+        return base[:pages]
+    titles = list(base)
+    while len(titles) < pages:
+        titles.append(f"补充专题 {len(titles) + 1}")
+    return titles
+
+
 def _source_trust_score(source_id: str) -> float:
     sid = (source_id or "").lower()
     if any(tag in sid for tag in ("gov", "edu", "official", "who", "un", "oecd", "imf", "worldbank")):
@@ -133,6 +154,48 @@ def _build_generation_seed(
     if raw_notes:
         parts.append(f"补充备注：{raw_notes}")
     return "\n".join(parts)
+
+
+def _build_grounded_generation_seed(
+    generation_seed: str,
+    retrieval_by_slide: dict[str, list[dict[str, Any]]],
+) -> str:
+    lines: list[str] = [
+        generation_seed,
+        "",
+        "以下是可引用证据（仅允许使用这些证据中的事实，禁止自行新增统计数据或来源）：",
+    ]
+    for slide_title, hits in retrieval_by_slide.items():
+        lines.append(f"- 页面：{slide_title}")
+        if not hits:
+            lines.append("  - 无可用证据")
+            continue
+        for idx, hit in enumerate(hits[:3], start=1):
+            snippet = str(hit.get("snippet") or "").replace("\n", " ").strip()
+            source_id = str(hit.get("source_id") or "unknown").strip()
+            locator = str(hit.get("locator") or "").strip()
+            lines.append(f"  - 证据{idx}: {snippet}（来源: {source_id}；定位: {locator}）")
+    lines.append("")
+    lines.append("写作约束：若证据不足，请使用定性表达，不要编造具体数字、年份、机构结论。")
+    return "\n".join(lines)
+
+
+def _strip_unverified_evidence(outline: dict[str, Any]) -> dict[str, Any]:
+    """Remove LLM-provided evidence to prevent fabricated citations."""
+    slides = outline.get("slides", [])
+    if isinstance(slides, list):
+        for slide in slides:
+            if not isinstance(slide, dict):
+                continue
+            bullets = slide.get("bullets", [])
+            if not isinstance(bullets, list):
+                continue
+            for bullet in bullets:
+                if not isinstance(bullet, dict):
+                    continue
+                bullet["evidence_ids"] = []
+    outline["evidence_catalog"] = []
+    return outline
 
 
 def _should_retrieve(retrieval_depth: str, clarification: dict[str, Any] | None, raw_notes: str | None) -> bool:
@@ -187,18 +250,19 @@ def _inject_evidence(
     if not isinstance(slides, list):
         return outline
 
-    evidence_catalog = outline.get("evidence_catalog", [])
-    if not isinstance(evidence_catalog, list):
-        evidence_catalog = []
-
-    next_id = len(evidence_catalog) + 1
+    evidence_catalog: list[dict[str, Any]] = []
+    next_id = 1
     coverage_total = 0
     low_confidence_slides: list[str] = []
-    for slide in slides:
+    retrieval_items = list(retrieval_by_slide.items())
+    for slide_idx, slide in enumerate(slides):
         if not isinstance(slide, dict):
             continue
         title = str(slide.get("title") or "")
         hits = retrieval_by_slide.get(title, [])
+        if not hits and slide_idx < len(retrieval_items):
+            # Fallback: when LLM rewrites slide titles, keep evidence aligned by page order.
+            _, hits = retrieval_items[slide_idx]
         if not hits:
             low_confidence_slides.append(title)
             continue
@@ -291,14 +355,12 @@ def generate_outline_with_research(
         raw_notes=raw_notes,
         document_summary=document_summary,
     )
-    outline = generate_outline(topic=generation_seed, retrieval_depth=retrieval_depth, target_pages=target_pages)
     if not _should_retrieve(retrieval_depth=retrieval_depth, clarification=clarification, raw_notes=raw_notes):
+        outline = generate_outline(topic=generation_seed, retrieval_depth=retrieval_depth, target_pages=target_pages)
+        outline = _strip_unverified_evidence(outline)
         return outline
 
-    slides = outline.get("slides", [])
-    slide_titles = [str(s.get("title") or "") for s in slides if isinstance(s, dict)]
-    if not slide_titles:
-        return outline
+    slide_titles = _default_slide_titles(target_pages=target_pages)
     min_evidence_per_slide = max(1, settings.retrieval_min_evidence_per_slide)
     min_quality_score = max(0.0, min(1.0, settings.retrieval_min_quality_score))
 
@@ -319,6 +381,17 @@ def generate_outline_with_research(
             min_quality_score=min_quality_score,
             retrieval_by_slide=retrieval_by_slide,
         )
+
+    grounded_seed = _build_grounded_generation_seed(
+        generation_seed=generation_seed,
+        retrieval_by_slide=retrieval_by_slide,
+    )
+    outline = generate_outline(
+        topic=grounded_seed,
+        retrieval_depth=retrieval_depth,
+        target_pages=target_pages,
+    )
+    outline = _strip_unverified_evidence(outline)
 
     enriched = _inject_evidence(
         outline=outline,
