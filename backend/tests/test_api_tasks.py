@@ -254,6 +254,82 @@ def test_long_document_builds_internal_document_profile() -> None:
     assert isinstance(profile, dict)
     assert profile.get("char_count", 0) > 0
     assert profile.get("segment_count", 0) > 0
+    assert isinstance(profile.get("key_points"), list)
+    assert isinstance(profile.get("keywords"), list)
+
+
+def test_task_not_found_returns_contract_error() -> None:
+    client = TestClient(app)
+    missing_id = "00000000-0000-4000-8000-000000000099"
+    resp = client.get(f"/api/tasks/{missing_id}")
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "TASK_NOT_FOUND"
+
+
+def test_invalid_task_id_returns_client_error() -> None:
+    client = TestClient(app)
+    resp = client.get("/api/tasks/not-a-uuid")
+    # FastAPI path param {task_id:uuid} rejects non-UUID before our handler (404).
+    assert resp.status_code in (404, 422)
+
+
+def test_create_task_empty_topic_returns_validation_error() -> None:
+    client = TestClient(app)
+    resp = client.post("/api/tasks", json={"topic": "", "retrieval_depth": "L1"})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_long_document_generation_passes_document_profile_to_orchestration() -> None:
+    client = TestClient(app)
+    document_text = "远程医疗平台可提升基层诊断效率。" * 80
+    create = client.post(
+        "/api/tasks",
+        json={
+            "topic": "远程医疗",
+            "source_type": "long_document",
+            "document_text": document_text,
+            "document_title": "行业报告",
+            "retrieval_depth": "L0",
+        },
+    ).json()
+    task_id = create["task_id"]
+    client.patch(
+        f"/api/tasks/{task_id}/clarification",
+        json={"answers": [{"question_id": "goal", "answer": "说明价值"}], "submitted": True},
+    )
+
+    captured: dict = {}
+
+    def _capture(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return {
+            "title": "远程医疗大纲",
+            "slides": [
+                {
+                    "slide_id": "s1",
+                    "title": "页1",
+                    "bullets": [{"bullet_id": "s1-b1", "text": "要点", "evidence_ids": []}],
+                    "speaker_notes": "",
+                }
+            ],
+            "evidence_catalog": [],
+            "meta": {"retrieval_depth": "L0", "generated_at": "2026-01-01T00:00:00Z"},
+        }
+
+    old_enqueue = tasks_route.enqueue_generation
+    old_orch = tasks_route.generate_outline_with_research
+    tasks_route.enqueue_generation = _sync_enqueue
+    tasks_route.generate_outline_with_research = _capture  # type: ignore[assignment]
+    try:
+        client.post(f"/api/tasks/{task_id}/generate", json={})
+        profile = captured.get("document_profile")
+        assert isinstance(profile, dict)
+        assert profile.get("segment_count", 0) > 0
+        assert captured.get("source_type") == "long_document"
+    finally:
+        tasks_route.enqueue_generation = old_enqueue
+        tasks_route.generate_outline_with_research = old_orch
 
 
 def test_recover_inflight_generations_marks_stale_and_requeues() -> None:

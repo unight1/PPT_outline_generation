@@ -15,7 +15,7 @@
 
 - 在 `generating/done/failed` 状态下修改澄清，返回 `409 INVALID_STATE`。
 - 生成执行异常时：
-  - 若未超过重试上限：回退到 `pending`（可重试）；
+  - 若未超过重试上限：保持 `generating`，后台自动重试（`error` 中带 `next_attempt`）；
   - 若超过重试上限：进入 `failed`。
 - 对 `failed` 任务可调用 `POST /api/tasks/{task_id}/retry` 显式重试。
 - 进程重启时会恢复 `generating` 任务；陈旧任务可先回写为 `pending` 再重排队。
