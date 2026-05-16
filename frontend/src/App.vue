@@ -104,6 +104,11 @@ async function handleSubmitClarification() {
 async function handleGenerate() {
   if (!task.value) return
 
+  if (task.value.clarification && !task.value.clarification.submitted) {
+    errorMessage.value = '请先提交需求澄清，再触发大纲生成。'
+    return
+  }
+
   loading.value = true
   errorMessage.value = ''
 
@@ -172,7 +177,7 @@ function restart() {
       <p class="eyebrow">PPT Outline Generation</p>
       <h1>智能 PPT 大纲生成前端 Demo</h1>
       <p class="subtitle">
-        第 3–4 周 C 任务：需求澄清 -> 任务状态 -> 大纲结果展示。当前接口模式：{{ apiModeLabel }}。
+       当前接口模式：{{ apiModeLabel }}。
       </p>
     </section>
 
@@ -282,6 +287,11 @@ function restart() {
       <p v-if="task.status === 'generating'" class="hint">
         正在轮询后端任务状态，通常在数十秒到数分钟内完成（视模型与检索耗时而定）。
       </p>
+      <div v-if="task.status === 'failed'" class="failed-box">
+        <strong>任务失败</strong>
+        <p>错误码：{{ task.error?.code ?? 'UNKNOWN' }}</p>
+        <p>错误信息：{{ task.error?.message ?? '后端未返回错误信息' }}</p>
+      </div>
     </section>
 
     <section v-if="view === 'result' && task?.outline" class="card">
@@ -303,7 +313,7 @@ function restart() {
           :key="slide.slide_id"
           class="slide"
         >
-          <h3>第 {{ index + 1 }} 页：{{ slide.title }}</h3>
+          <h3>第 {{ index + 1 }} 页 / {{ slide.slide_id }}：{{ slide.title }}</h3>
 
           <ul>
             <li v-for="bullet in slide.bullets" :key="bullet.bullet_id">
@@ -522,6 +532,19 @@ button.secondary {
 
 .evidence-card small {
   color: #5d6b82;
+}
+
+.failed-box {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 12px;
+  background: #fff5f5;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+}
+
+.failed-box p {
+  margin: 8px 0 0;
 }
 
 @media (max-width: 720px) {
