@@ -78,7 +78,8 @@ npm run dev
 
 ## 联调必读
 
-- 接口与数据结构契约：`docs/api_contract_v0.md`
+- 接口与数据结构契约（v1，新功能）：`docs/api_contract_v1.md`
+- 遗留一次性生成契约（v0）：`docs/api_contract_v0.md`
 - 任务状态流转说明：`docs/management/task_state_flow.md`
 
 ## 下一步开发建议

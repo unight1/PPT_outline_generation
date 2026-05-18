@@ -17,6 +17,7 @@ from app.task_store import list_tasks as db_list_tasks
 from app.task_store import list_tasks_by_status as db_list_tasks_by_status
 from app.task_store import save_task as db_save_task
 from app.task_store import store_available
+from app.services.document_processing import build_document_profile
 from app.services.generation import should_force_fail
 from app.services.orchestration import generate_outline_with_research
 
@@ -123,26 +124,6 @@ def _estimate_page_range(duration_minutes: int) -> str:
     low = max(5, duration_minutes // 2)
     high = max(low + 2, duration_minutes)
     return f"{low}-{high} 页"
-
-
-def _build_document_profile(document_text: str | None) -> dict[str, Any] | None:
-    text = (document_text or "").strip()
-    if not text:
-        return None
-    normalized = " ".join(text.split())
-    segments: list[str] = []
-    chunk_size = 500
-    for start in range(0, min(len(normalized), 3000), chunk_size):
-        end = min(start + chunk_size, len(normalized))
-        part = normalized[start:end].strip()
-        if part:
-            segments.append(part)
-    return {
-        "char_count": len(normalized),
-        "segment_count": len(segments),
-        "summary": normalized[:1500],
-        "segments": segments[:6],
-    }
 
 
 def build_default_clarification_questions(payload: CreateTaskRequest) -> list[dict[str, Any]]:
@@ -290,7 +271,7 @@ def create_task(payload: CreateTaskRequest) -> CreateTaskResponse:
     created_at = now_iso()
     input_payload = payload.model_dump()
     if payload.source_type == "long_document":
-        input_payload["document_profile"] = _build_document_profile(payload.document_text)
+        input_payload["document_profile"] = build_document_profile(payload.document_text)
     task = {
         "task_id": task_id,
         "schema_version": settings.task_schema_version,
@@ -441,7 +422,7 @@ def complete_generation(task_id: str) -> None:
                 source_type=task["input"].get("source_type", "short_topic"),
                 document_text=task["input"].get("document_text"),
                 document_title=task["input"].get("document_title"),
-                document_summary=(task["input"].get("document_profile") or {}).get("summary"),
+                document_profile=task["input"].get("document_profile"),
             )
             try:
                 task["outline"] = future.result(timeout=max(1, settings.generation_hard_timeout_seconds))
