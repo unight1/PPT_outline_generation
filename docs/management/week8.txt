@@ -1,0 +1,135 @@
+================================================================================
+  第 8 周 — 四人分工（更新任务）
+================================================================================
+  契约：docs/api_contract_v1.md
+  说明：不含 D1（测试与文档）；共 11 个模块，按 3+3+3+2 分配。
+  联调：各自模块完成后，用 Mock 或本地后端按 v1 字段对接即可。
+
+================================================================================
+  成员 1（3 项）— 检索提速 + Prompt + 澄清页
+================================================================================
+
+  【A1】检索提速
+    验收：同样 6 页，检索耗时明显短于改前。
+    要做：多页检索并行；默认关二轮加深检索；Tavily 联网可配置且默认不每页都搜。
+    文件：backend/app/services/orchestration.py
+          backend/app/config.py
+          .env.example
+
+  【A2】Prompt / 证据
+    验收：LLM 不再输出 evidence；证据仅检索后由后端注入。
+    要做：改 generation.py 的 prompt，去掉 evidence 相关要求；
+          保留 orchestration 中检索后的证据注入逻辑。
+    文件：backend/app/services/generation.py
+          backend/app/services/orchestration.py
+
+  【C1】前端·澄清
+    验收：能创建任务、提交澄清；提交后进入骨架流程（不再默认一键旧版 generate）。
+    要做：沿用现有表单；对接 v1 字段；提交 clar 后跳转骨架页。
+    文件：frontend/src/App.vue（或拆组件）
+          frontend/src/types/task.ts
+          frontend/src/api/httpApi.ts
+          frontend/src/api/mockApi.ts
+
+================================================================================
+  成员 2（3 项）— 骨架 API + 状态恢复 + 骨架页
+================================================================================
+
+  【B2】骨架生成 API
+    验收：能 POST 生成 outline_skeleton，能 PATCH 修改骨架。
+    要做：实现 api_contract_v1.md §3.1、§3.2。
+    建议新建：backend/app/services/skeleton.py
+    文件：backend/app/api/routes/tasks.py
+
+  【B4】状态与恢复
+    验收：v1 流程状态与 progress.phase 符合契约；进程重启后能恢复 generating 任务。
+    要做：见 api_contract_v1.md §7、docs/management/task_state_flow.md。
+    文件：backend/app/api/routes/tasks.py
+          backend/app/main.py
+
+  【C2】前端·骨架页
+    验收：展示并编辑 outline_skeleton；可点击触发按页生成；生成中能看到 progress。
+    要做：对接 POST .../skeleton/generate、PATCH .../skeleton、POST .../slides/generate。
+    文件：frontend/src/App.vue
+          frontend/src/types/task.ts
+          frontend/src/api/httpApi.ts
+          frontend/src/api/mockApi.ts
+
+================================================================================
+  成员 3（3 项）— 按页生成 + 进度上报 + 单页重做
+================================================================================
+
+  【B3】按页生成 API
+    验收：根据 outline_skeleton 逐页检索 + LLM，合并为完整 outline；符合 §3.3。
+    要做：新建 page_generation 服务；更新 progress；控制并发（建议 2～3 页）。
+    建议新建：backend/app/services/page_generation.py
+    文件：backend/app/api/routes/tasks.py
+          backend/app/services/orchestration.py（复用/抽取检索工具）
+    备注：与成员 1 的 A1、A2 联调；进度字段与成员 4 的 A3 一致。
+
+  【A3】进度上报
+    验收：GET 任务时 progress（phase/current/total/message/percent）随步骤变化。
+    要做：在骨架生成、按页生成、单页重生成等步骤中 persist_task。
+    文件：backend/app/api/routes/tasks.py
+          backend/app/task_store.py
+          backend/app/services/skeleton.py（与 B2 协调）
+          backend/app/services/page_generation.py
+
+  【C4】前端·单页重做
+    验收：某一页可点「重新生成」；仅该页更新，其它页不变。
+    要做：对接 POST .../slides/{slide_id}/regenerate；展示该页生成中的 progress。
+    文件：frontend/src/App.vue
+          frontend/src/types/task.ts
+          frontend/src/api/httpApi.ts
+          frontend/src/api/mockApi.ts
+
+================================================================================
+  成员 4（2 项）— 进度展示 + 结果编辑
+================================================================================
+
+  【A4】前端进度展示
+    验收：生成中显示 progress.message；有 percent 时可显示进度条；无则显示「处理中」。
+    要做：轮询 GET /api/tasks/{id} 读取 progress；用于骨架生成与按页生成过程。
+    文件：frontend/src/App.vue
+          frontend/src/types/task.ts
+          frontend/src/api/httpApi.ts
+
+  【C3】前端·结果页
+    验收：展示完整 outline（含 evidence_catalog）；用户改字后可 PATCH 保存。
+    要做：对接 PATCH .../outline；done 后进入结果视图。
+    文件：frontend/src/App.vue
+          frontend/src/types/task.ts
+          frontend/src/api/httpApi.ts
+          frontend/src/api/mockApi.ts
+
+  说明：成员 4 仅 2 项，但偏 UI 整合；可与成员 2 的 C2、成员 3 的 C4 协调 App.vue 拆分或合并 PR。
+
+================================================================================
+  分工一览表
+================================================================================
+
+  成员 | 模块              | 后端/前端
+  -----|-------------------|----------
+  1    | A1, A2, C1        | 后后前
+  2    | B2, B4, C2        | 后后前
+  3    | B3, A3, C4        | 后后前
+  4    | A4, C3            | 前后
+
+================================================================================
+  端到端流程（四人联调参照）
+================================================================================
+
+  C1 澄清 → B2/C2 骨架 → C2 触发 B3 按页生成（A3 进度、A4 展示、A1/A2 提速）
+  → C3 编辑结果 → C4 单页重做（B3 接口）
+
+  旧 POST .../generate 可不删；新界面不走旧接口。
+
+================================================================================
+  共同遵守
+================================================================================
+
+  · 字段名以 api_contract_v1.md 为准
+  · 按页生成不要默认每页 Tavily 联网
+  · 未迁移评测前不要删除旧 generate
+
+================================================================================
