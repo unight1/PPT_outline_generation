@@ -31,11 +31,23 @@ def _ensure_table() -> None:
       input_json LONGTEXT NOT NULL,
       clarification_json LONGTEXT NOT NULL,
       outline_json LONGTEXT NULL,
+      outline_skeleton_json LONGTEXT NULL,
+      progress_json LONGTEXT NULL,
       error_json LONGTEXT NULL
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
     """
     with engine.begin() as conn:
         conn.execute(text(create_sql))
+        # Add v1 columns to existing tables if missing.
+        for col in ("outline_skeleton_json", "progress_json"):
+            try:
+                conn.execute(
+                    text(
+                        f"ALTER TABLE tasks ADD COLUMN {col} LONGTEXT NULL"
+                    )
+                )
+            except Exception:
+                pass
     _TABLE_READY = True
 
 
@@ -60,11 +72,13 @@ def save_task(task: dict[str, Any]) -> None:
     upsert_sql = """
     INSERT INTO tasks (
       task_id, status, created_at, updated_at,
-      input_json, clarification_json, outline_json, error_json
+      input_json, clarification_json, outline_json, outline_skeleton_json,
+      progress_json, error_json
     )
     VALUES (
       :task_id, :status, :created_at, :updated_at,
-      :input_json, :clarification_json, :outline_json, :error_json
+      :input_json, :clarification_json, :outline_json, :outline_skeleton_json,
+      :progress_json, :error_json
     )
     ON DUPLICATE KEY UPDATE
       status = VALUES(status),
@@ -72,6 +86,8 @@ def save_task(task: dict[str, Any]) -> None:
       input_json = VALUES(input_json),
       clarification_json = VALUES(clarification_json),
       outline_json = VALUES(outline_json),
+      outline_skeleton_json = VALUES(outline_skeleton_json),
+      progress_json = VALUES(progress_json),
       error_json = VALUES(error_json)
     """
     with engine.begin() as conn:
@@ -85,7 +101,9 @@ def save_task(task: dict[str, Any]) -> None:
                 "input_json": _serialize(task["input"]),
                 "clarification_json": _serialize(task["clarification"]),
                 "outline_json": _serialize(task["outline"]),
-                "error_json": _serialize(task["error"]),
+                "outline_skeleton_json": _serialize(task.get("outline_skeleton")),
+                "progress_json": _serialize(task.get("progress")),
+                "error_json": _serialize(task.get("error")),
             },
         )
 
@@ -96,7 +114,8 @@ def get_task(task_id: str) -> dict[str, Any] | None:
         return None
     _ensure_table()
     query_sql = """
-    SELECT task_id, status, created_at, updated_at, input_json, clarification_json, outline_json, error_json
+    SELECT task_id, status, created_at, updated_at, input_json, clarification_json,
+           outline_json, outline_skeleton_json, progress_json, error_json
     FROM tasks
     WHERE task_id = :task_id
     LIMIT 1
@@ -113,6 +132,8 @@ def get_task(task_id: str) -> dict[str, Any] | None:
         "input": _deserialize(row["input_json"]),
         "clarification": _deserialize(row["clarification_json"]),
         "outline": _deserialize(row["outline_json"]),
+        "outline_skeleton": _deserialize(row["outline_skeleton_json"]),
+        "progress": _deserialize(row["progress_json"]),
         "error": _deserialize(row["error_json"]),
     }
 
@@ -123,7 +144,8 @@ def list_tasks_by_status(status: str, limit: int = 100) -> list[dict[str, Any]]:
         return []
     _ensure_table()
     query_sql = """
-    SELECT task_id, status, created_at, updated_at, input_json, clarification_json, outline_json, error_json
+    SELECT task_id, status, created_at, updated_at, input_json, clarification_json,
+           outline_json, outline_skeleton_json, progress_json, error_json
     FROM tasks
     WHERE status = :status
     ORDER BY updated_at DESC
@@ -143,6 +165,8 @@ def list_tasks_by_status(status: str, limit: int = 100) -> list[dict[str, Any]]:
                 "input": _deserialize(row["input_json"]),
                 "clarification": _deserialize(row["clarification_json"]),
                 "outline": _deserialize(row["outline_json"]),
+                "outline_skeleton": _deserialize(row["outline_skeleton_json"]),
+                "progress": _deserialize(row["progress_json"]),
                 "error": _deserialize(row["error_json"]),
             }
         )
@@ -155,7 +179,8 @@ def list_tasks(limit: int = 200) -> list[dict[str, Any]]:
         return []
     _ensure_table()
     query_sql = """
-    SELECT task_id, status, created_at, updated_at, input_json, clarification_json, outline_json, error_json
+    SELECT task_id, status, created_at, updated_at, input_json, clarification_json,
+           outline_json, outline_skeleton_json, progress_json, error_json
     FROM tasks
     ORDER BY updated_at DESC
     LIMIT :limit
@@ -174,6 +199,8 @@ def list_tasks(limit: int = 200) -> list[dict[str, Any]]:
                 "input": _deserialize(row["input_json"]),
                 "clarification": _deserialize(row["clarification_json"]),
                 "outline": _deserialize(row["outline_json"]),
+                "outline_skeleton": _deserialize(row["outline_skeleton_json"]),
+                "progress": _deserialize(row["progress_json"]),
                 "error": _deserialize(row["error_json"]),
             }
         )
