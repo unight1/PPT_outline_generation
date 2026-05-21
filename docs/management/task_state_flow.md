@@ -1,33 +1,55 @@
-# 任务状态流转说明（A/C/D 对齐版）
+# 任务状态流转说明（v1）
 
-本文用于前后端联调与评测对齐，描述 `TaskStatus` 的标准流转与异常分支。
+本文描述 v1 流程下的 `TaskStatus` 与 `progress.phase` 配合关系。HTTP 契约见 [`api_contract_v1.md`](../api_contract_v1.md)。
 
-## 1. 标准主路径
+---
 
-- `POST /api/tasks` 创建任务后，状态为 `clarifying`。
-- 用户通过 `PATCH /api/tasks/{task_id}/clarification` 提交澄清：
-  - `submitted=false`：保持 `clarifying`；
-  - `submitted=true`：进入 `pending`。
-- 仅当 `submitted=true` 时，`POST /api/tasks/{task_id}/generate` 才可触发，状态进入 `generating`。
-- 生成成功后进入 `done`，并返回非空 `outline`。
+## 1. v1 主路径（推荐）
 
-## 2. 异常与恢复路径
+1. `POST /api/tasks` → 通常 `clarifying`
+2. `PATCH .../clarification`，`submitted=true` → `pending`
+3. `POST .../skeleton/generate` → `generating`（`progress.phase=skeleton_llm`）→ 完成 → `pending` + `outline_skeleton` 有值 + `progress.phase=skeleton_ready`
+4. （可选）`PATCH .../skeleton` 用户改标题 → 仍 `pending`
+5. `POST .../slides/generate` → `generating`（`retrieving_page` / `llm_page` / `assembling` 等）→ `done` + `outline` 非空
+6. （可选）`PATCH .../outline` 用户改字 → `done`
+7. （可选）`POST .../slides/{slide_id}/regenerate` → 短暂 `generating` → `done`
 
-- 在 `generating/done/failed` 状态下修改澄清，返回 `409 INVALID_STATE`。
-- 生成执行异常时：
-  - 若未超过重试上限：回退到 `pending`（可重试）；
-  - 若超过重试上限：进入 `failed`。
-- 对 `failed` 任务可调用 `POST /api/tasks/{task_id}/retry` 显式重试。
-- 进程重启时会恢复 `generating` 任务；陈旧任务可先回写为 `pending` 再重排队。
+**轮询**：步骤 3、5、7 执行中客户端轮询 `GET /api/tasks/{id}`，读 `progress.message` 与 `progress.current/total`。
 
-## 3. 关键错误码（生成阶段）
+---
 
-- `GENERATION_TIMEOUT`：生成超时（本地硬超时或上游超时）。
-- `RETRIEVAL_UNAVAILABLE`：检索子系统不可用。
-- `INTERNAL_ERROR`：未分类内部错误。
+## 2. 遗留路径（v0 一次性生成）
 
-## 4. 联调与评测建议
+- `POST .../generate`（澄清已提交）→ `generating` → `done` / `failed`
+- 不使用 `outline_skeleton`；不经过按页流程
+- 详见 v0 契约；新界面不应依赖
 
-- C 侧轮询终止条件：`done` 或 `failed`。
-- D 侧批量评测可调用 `GET /api/tasks?status_filter=...` 拉取状态分布。
-- 对 `pending` 状态任务可进行自动重试；`failed` 需要人工复核错误明细。
+---
+
+## 3. 异常与恢复
+
+- `generating` / `done` / `failed` 下修改澄清 → `409 INVALID_STATE`
+- 按页或全量生成失败：未超重试上限可保持 `generating` 并自动重试（`error.details.next_attempt`）；否则 `failed`
+- `POST .../retry`：仅 `failed`，整任务重试（遗留兼容）
+- 单页失败：优先 `POST .../slides/{slide_id}/regenerate`，不必整任务 retry
+- 进程重启：恢复卡在 `generating` 的任务；陈旧任务可回写 `pending` 再排队（实现与 v0 相同，扩展支持 `slides/generate` 任务）
+
+---
+
+## 4. 对外状态 vs 细阶段
+
+| 用户看到的 `status` | 常见 `progress.phase` |
+|---------------------|------------------------|
+| `clarifying` | `idle` 或 null |
+| `pending` | `idle`, `skeleton_ready` |
+| `generating` | `skeleton_llm`, `retrieving_page`, `llm_page`, `assembling`, `regenerating_slide` |
+| `done` | `done` 或 null |
+| `failed` | `failed` 或 null |
+
+---
+
+## 5. 联调建议
+
+- 终止轮询：`status` 为 `done` 或 `failed`
+- 进度展示：不要只依赖 `status=generating`，应读 `progress`
+- 批量评测：`GET /api/tasks?status_filter=...`；v1 任务检查 `schema_version` 是否 `v1.0.0`

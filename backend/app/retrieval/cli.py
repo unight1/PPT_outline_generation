@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import logging
 
+from app.config import settings
 from app.retrieval import RetrievalDepth, RetrievalRequest, get_retriever
 
 logging.basicConfig(level=logging.WARNING, format="%(name)s %(levelname)s: %(message)s")
@@ -22,7 +23,11 @@ async def main() -> None:
     args = parse_args()
 
     import os
-    tavily_key = args.tavily_key or os.environ.get("TAVILY_API_KEY", "")
+    tavily_key = (
+        args.tavily_key
+        or os.environ.get("TAVILY_API_KEY", "")
+        or (settings.tavily_api_key or "")
+    )
 
     retriever = get_retriever(
         documents_dir=args.docs,

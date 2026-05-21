@@ -24,6 +24,7 @@ def _warmup_retriever_background() -> None:
             get_retriever(
                 documents_dir=settings.retrieval_documents_dir,
                 chroma_persist_dir=settings.retrieval_chroma_dir,
+                tavily_api_key=settings.tavily_api_key or "",
             )
             log.info("Retriever warmup completed.")
         except Exception:
