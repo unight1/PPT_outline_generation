@@ -5,6 +5,7 @@ import {
   createTask,
   generateOutline,
   getTask,
+  regenerateSlide,
   submitClarification,
   apiModeLabel,
 } from './api'
@@ -155,9 +156,59 @@ async function handleGenerate() {
   }
 }
 
+const regeneratingSlideId = ref<string | null>(null)
+
+async function handleRegenerateSlide(slideId: string, userInstruction?: string) {
+  if (!task.value || regeneratingSlideId.value) return
+  regeneratingSlideId.value = slideId
+  errorMessage.value = ''
+
+  try {
+    await regenerateSlide(task.value.task_id, slideId, {
+      user_instruction: userInstruction || undefined,
+    })
+
+    const pollStart = Date.now()
+    const maxPollMs = 10 * 60 * 1000
+    let pollingInFlight = false
+
+    const timer = window.setInterval(() => {
+      if (!task.value) return
+      if (pollingInFlight) return
+
+      void (async () => {
+        pollingInFlight = true
+        try {
+          const latestTask = await getTask(task.value!.task_id)
+          task.value = latestTask
+
+          if (latestTask.status === 'done' || latestTask.status === 'failed') {
+            window.clearInterval(timer)
+            regeneratingSlideId.value = null
+          } else if (Date.now() - pollStart > maxPollMs) {
+            window.clearInterval(timer)
+            regeneratingSlideId.value = null
+            errorMessage.value = '单页重生成轮询超时'
+          }
+        } catch (error) {
+          window.clearInterval(timer)
+          regeneratingSlideId.value = null
+          errorMessage.value = error instanceof Error ? error.message : '重生成失败'
+        } finally {
+          pollingInFlight = false
+        }
+      })()
+    }, 1200)
+  } catch (error) {
+    regeneratingSlideId.value = null
+    errorMessage.value = error instanceof Error ? error.message : '重生成失败'
+  }
+}
+
 function restart() {
   view.value = 'form'
   task.value = null
+  regeneratingSlideId.value = null
   errorMessage.value = ''
   form.topic = ''
   form.source_type = 'short_topic'
@@ -313,7 +364,16 @@ function restart() {
           :key="slide.slide_id"
           class="slide"
         >
-          <h3>第 {{ index + 1 }} 页 / {{ slide.slide_id }}：{{ slide.title }}</h3>
+          <div class="slide-header">
+            <h3>第 {{ index + 1 }} 页 / {{ slide.slide_id }}：{{ slide.title }}</h3>
+            <button
+              class="secondary small"
+              :disabled="regeneratingSlideId !== null"
+              @click="handleRegenerateSlide(slide.slide_id)"
+            >
+              {{ regeneratingSlideId === slide.slide_id ? '重生成中...' : '重新生成' }}
+            </button>
+          </div>
 
           <ul>
             <li v-for="bullet in slide.bullets" :key="bullet.bullet_id">
@@ -486,6 +546,24 @@ button.secondary {
 
 .hint {
   color: #5d6b82;
+}
+
+.slide-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.slide-header h3 {
+  margin: 0;
+  flex: 1;
+}
+
+button.small {
+  padding: 6px 12px;
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .slide {

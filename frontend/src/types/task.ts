@@ -74,12 +74,40 @@ export interface TaskError {
   details?: Record<string, unknown>
 }
 
+export interface OutlineSkeletonSlide {
+  slide_id: string
+  title: string
+  intent: string | null
+  user_notes: string | null
+}
+
+export interface Progress {
+  phase: string
+  current: number | null
+  total: number | null
+  message: string
+  percent: number | null
+}
+
 export interface Task {
   task_id: string
   status: TaskStatus
   created_at: string
   updated_at: string
   clarification: Clarification | null
+  outline_skeleton: OutlineSkeletonSlide[] | null
   outline: Outline | null
+  progress: Progress | null
   error: TaskError | null
+}
+
+export interface RegenerateSlideRequest {
+  user_instruction?: string
+}
+
+export interface RegenerateSlideResponse {
+  task_id: string
+  status: TaskStatus
+  accepted: boolean
+  slide_id: string
 }

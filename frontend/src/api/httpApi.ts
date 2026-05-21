@@ -1,6 +1,8 @@
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
+  RegenerateSlideRequest,
+  RegenerateSlideResponse,
   Task,
 } from '../types/task'
 
@@ -85,5 +87,19 @@ export async function generateOutline(taskId: string): Promise<Task> {
 
   // Keep UI data model simple: immediately fetch latest full snapshot.
   return getTask(result.task_id)
+}
+
+export async function regenerateSlide(
+  taskId: string,
+  slideId: string,
+  request?: RegenerateSlideRequest,
+): Promise<RegenerateSlideResponse> {
+  return requestJson<RegenerateSlideResponse>(
+    `/api/tasks/${taskId}/slides/${slideId}/regenerate`,
+    {
+      method: 'POST',
+      body: JSON.stringify(request ?? {}),
+    },
+  )
 }
 

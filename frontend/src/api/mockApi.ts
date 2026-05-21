@@ -1,6 +1,8 @@
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
+  RegenerateSlideRequest,
+  RegenerateSlideResponse,
   Task,
 } from '../types/task'
 import { mockTaskClarifying, mockTaskDone } from '../mocks/mockTask'
@@ -96,4 +98,40 @@ export async function generateOutline(taskId: string): Promise<Task> {
   }
 
   return currentTask
+}
+
+export async function regenerateSlide(
+  taskId: string,
+  slideId: string,
+  request?: RegenerateSlideRequest,
+): Promise<RegenerateSlideResponse> {
+  await sleep(400)
+
+  if (!currentTask || currentTask.task_id !== taskId) {
+    throw new Error('任务不存在')
+  }
+
+  // Simulate regeneration: briefly set status to generating, then back to done.
+  pollCount = 0
+  currentTask = {
+    ...currentTask,
+    status: 'generating',
+    progress: {
+      phase: 'regenerating_slide',
+      current: 1,
+      total: 1,
+      message: `正在重新生成 ${slideId}...`,
+      percent: 0,
+    },
+    updated_at: new Date().toISOString(),
+  }
+
+  console.log('Mock regenerate slide:', slideId, request?.user_instruction)
+
+  return {
+    task_id: taskId,
+    status: 'generating',
+    accepted: true,
+    slide_id: slideId,
+  }
 }
