@@ -5,6 +5,33 @@ export type TaskStatus =
   | 'done'
   | 'failed'
 
+export type WorkflowPhase =
+  | 'idle'
+  | 'skeleton_llm'
+  | 'skeleton_ready'
+  | 'retrieving_page'
+  | 'llm_page'
+  | 'assembling'
+  | 'saving'
+  | 'regenerating_slide'
+  | 'done'
+  | 'failed'
+
+export interface Progress {
+  phase: WorkflowPhase
+  current: number | null
+  total: number | null
+  message?: string
+  percent: number | null
+}
+
+export interface OutlineSkeletonSlide {
+  slide_id: string
+  title: string
+  intent: string | null
+  user_notes: string | null
+}
+
 export type RetrievalDepth = 'L0' | 'L1' | 'L2'
 
 export interface CreateTaskRequest {
@@ -63,8 +90,10 @@ export interface Outline {
   slides: Slide[]
   evidence_catalog: Evidence[]
   meta: {
-    retrieval_depth: RetrievalDepth
-    generated_at: string
+    retrieval_depth?: RetrievalDepth
+    generated_at?: string
+    schema_version?: string
+    [key: string]: unknown
   }
 }
 
@@ -76,10 +105,13 @@ export interface TaskError {
 
 export interface Task {
   task_id: string
+  schema_version?: string
   status: TaskStatus
   created_at: string
   updated_at: string
   clarification: Clarification | null
+  outline_skeleton?: OutlineSkeletonSlide[] | null
   outline: Outline | null
+  progress?: Progress | null
   error: TaskError | null
 }

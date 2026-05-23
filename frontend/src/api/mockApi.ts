@@ -1,6 +1,7 @@
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
+  Outline,
   Task,
 } from '../types/task'
 import { mockTaskClarifying, mockTaskDone } from '../mocks/mockTask'
@@ -92,6 +93,25 @@ export async function generateOutline(taskId: string): Promise<Task> {
   currentTask = {
     ...currentTask,
     status: 'generating',
+    updated_at: new Date().toISOString(),
+  }
+
+  return currentTask
+}
+
+export async function saveOutline(
+  taskId: string,
+  outline: Outline,
+): Promise<Task> {
+  await sleep(600)
+
+  if (!currentTask || currentTask.task_id !== taskId) {
+    throw new Error('任务不存在')
+  }
+
+  currentTask = {
+    ...currentTask,
+    outline,
     updated_at: new Date().toISOString(),
   }
 

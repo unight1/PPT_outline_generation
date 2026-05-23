@@ -6,6 +6,7 @@ import {
   generateOutline,
   getTask,
   submitClarification,
+  saveOutline,
   apiModeLabel,
 } from './api'
 
@@ -15,6 +16,9 @@ const view = ref<ViewName>('form')
 const loading = ref(false)
 const errorMessage = ref('')
 const task = ref<Task | null>(null)
+const outlineDraft = ref<Task['outline'] | null>(null)
+const savingOutline = ref(false)
+const saveMessage = ref('')
 
 const form = reactive<CreateTaskRequest>({
   topic: '',
@@ -101,6 +105,29 @@ async function handleSubmitClarification() {
   }
 }
 
+function cloneOutline(outline: Task['outline']) {
+  return outline ? JSON.parse(JSON.stringify(outline)) : null
+}
+
+async function handleSaveOutline() {
+  if (!task.value || !outlineDraft.value) return
+
+  savingOutline.value = true
+  saveMessage.value = ''
+  errorMessage.value = ''
+
+  try {
+    task.value = await saveOutline(task.value.task_id, outlineDraft.value)
+    outlineDraft.value = cloneOutline(task.value.outline)
+    saveMessage.value = '修改已保存。'
+  } catch (error) {
+    errorMessage.value =
+      error instanceof Error ? error.message : '保存大纲失败，请稍后重试。'
+  } finally {
+    savingOutline.value = false
+  }
+}
+
 async function handleGenerate() {
   if (!task.value) return
 
@@ -133,6 +160,8 @@ async function handleGenerate() {
             loading.value = false
 
             if (latestTask.status === 'done') {
+              outlineDraft.value = cloneOutline(latestTask.outline)
+              saveMessage.value = ''
               view.value = 'result'
             }
           } else if (Date.now() - pollStart > maxPollMs) {
@@ -158,6 +187,9 @@ async function handleGenerate() {
 function restart() {
   view.value = 'form'
   task.value = null
+  outlineDraft.value = null
+  savingOutline.value = false
+  saveMessage.value = ''
   errorMessage.value = ''
   form.topic = ''
   form.source_type = 'short_topic'
@@ -284,9 +316,35 @@ function restart() {
         <button class="secondary" @click="restart">重新开始</button>
       </div>
 
-      <p v-if="task.status === 'generating'" class="hint">
-        正在轮询后端任务状态，通常在数十秒到数分钟内完成（视模型与检索耗时而定）。
-      </p>
+      <div v-if="task.status === 'generating'" class="progress-box">
+  <strong>
+    {{ task.progress?.message || '处理中，请稍候…' }}
+  </strong>
+
+  <p class="hint">
+    当前阶段：{{ task.progress?.phase || 'processing' }}
+    <span v-if="task.progress?.current != null && task.progress?.total != null">
+      ｜第 {{ task.progress.current }} / {{ task.progress.total }} 页
+    </span>
+  </p>
+
+  <div
+    v-if="typeof task.progress?.percent === 'number'"
+    class="progress-track"
+  >
+    <div
+      class="progress-fill"
+      :style="{ width: `${task.progress.percent}%` }"
+    />
+  </div>
+
+  <p v-if="typeof task.progress?.percent === 'number'" class="hint">
+    进度：{{ task.progress.percent }}%
+  </p>
+</div>
+          
+
+ 
       <div v-if="task.status === 'failed'" class="failed-box">
         <strong>任务失败</strong>
         <p>错误码：{{ task.error?.code ?? 'UNKNOWN' }}</p>
@@ -294,63 +352,90 @@ function restart() {
       </div>
     </section>
 
-    <section v-if="view === 'result' && task?.outline" class="card">
-      <div class="result-header">
-        <div>
-          <h2>{{ task.outline.title }}</h2>
-          <p>
-            检索深度：{{ task.outline.meta.retrieval_depth }} · 生成时间：
-            {{ task.outline.meta.generated_at }}
-          </p>
-        </div>
+    <section v-if="view === 'result' && outlineDraft" class="card">
+  <div class="result-header">
+    <div>
+      <p class="eyebrow">Outline Result</p>
+      <h2>完整大纲结果</h2>
+    </div>
 
-        <button class="secondary" @click="restart">生成新的大纲</button>
-      </div>
+    <div class="actions">
+      <button
+        class="primary"
+        :disabled="savingOutline"
+        @click="handleSaveOutline"
+      >
+        {{ savingOutline ? '保存中…' : '保存修改' }}
+      </button>
 
-      <div class="outline">
-        <article
-          v-for="(slide, index) in task.outline.slides"
-          :key="slide.slide_id"
-          class="slide"
+      <button class="secondary" @click="restart">生成新的大纲</button>
+    </div>
+  </div>
+
+  <p v-if="saveMessage" class="success-message">
+    {{ saveMessage }}
+  </p>
+
+  <label class="field">
+    整稿标题
+    <input v-model="outlineDraft.title" />
+  </label>
+
+  <div class="outline">
+    <article
+      v-for="(slide, index) in outlineDraft.slides"
+      :key="slide.slide_id"
+      class="slide"
+    >
+      <h3>第 {{ index + 1 }} 页 / {{ slide.slide_id }}</h3>
+
+      <label class="field">
+        页面标题
+        <input v-model="slide.title" />
+      </label>
+
+      <div class="bullets">
+        <label
+          v-for="bullet in slide.bullets"
+          :key="bullet.bullet_id"
+          class="field"
         >
-          <h3>第 {{ index + 1 }} 页 / {{ slide.slide_id }}：{{ slide.title }}</h3>
+          要点 {{ bullet.bullet_id }}
+          <textarea v-model="bullet.text" rows="2" />
 
-          <ul>
-            <li v-for="bullet in slide.bullets" :key="bullet.bullet_id">
-              {{ bullet.text }}
-
-              <span
-                v-if="bullet.evidence_ids.length"
-                class="evidence-tag"
-              >
-                证据：{{ bullet.evidence_ids.join(', ') }}
-              </span>
-            </li>
-          </ul>
-
-          <p v-if="slide.speaker_notes" class="notes">
-            讲者备注：{{ slide.speaker_notes }}
-          </p>
-        </article>
-      </div>
-
-      <section class="evidence">
-        <h3>证据目录</h3>
-
-        <article
-          v-for="evidence in task.outline.evidence_catalog"
-          :key="evidence.evidence_id"
-          class="evidence-card"
-        >
-          <strong>{{ evidence.evidence_id }}</strong>
-          <p>{{ evidence.snippet }}</p>
-          <small>
-            来源：{{ evidence.source_id }} · 位置：{{ evidence.locator }} ·
-            score：{{ evidence.score ?? '无' }} · confidence：{{ evidence.confidence ?? '无' }}
+          <small
+            v-if="bullet.evidence_ids.length"
+            class="evidence-tag"
+          >
+            证据：{{ bullet.evidence_ids.join(', ') }}
           </small>
-        </article>
-      </section>
-    </section>
+        </label>
+      </div>
+
+      <label class="field">
+        讲者备注
+        <textarea v-model="slide.speaker_notes" rows="3" />
+      </label>
+    </article>
+  </div>
+
+  <section class="evidence">
+    <h3>证据目录</h3>
+
+    <article
+      v-for="evidence in outlineDraft.evidence_catalog"
+      :key="evidence.evidence_id"
+      class="evidence-card"
+    >
+      <strong>{{ evidence.evidence_id }}</strong>
+      <p>{{ evidence.snippet }}</p>
+      <small>
+        来源：{{ evidence.source_id }} · 位置：{{ evidence.locator }} ·
+        score：{{ evidence.score ?? '无' }} · confidence：{{ evidence.confidence ?? '无' }}
+      </small>
+    </article>
+  </section>
+</section>
   </main>
 </template>
 
@@ -562,4 +647,49 @@ button.secondary {
     margin-top: 8px;
   }
 }
+
+.success-message {
+  padding: 10px 12px;
+  margin: 12px 0;
+  border-radius: 10px;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.progress-box {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.progress-track {
+  width: 100%;
+  height: 10px;
+  margin-top: 12px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #2563eb;
+  transition: width 0.3s ease;
+}
+
+.evidence-section {
+  margin-top: 24px;
+}
+
+.evidence-card {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+}
+
 </style>

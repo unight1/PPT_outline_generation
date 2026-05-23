@@ -11,6 +11,8 @@ export const submitClarification = useMock
 export const generateOutline = useMock
   ? mockApi.generateOutline
   : httpApi.generateOutline
+export const saveOutline = useMock
+  ? mockApi.saveOutline
+  : httpApi.saveOutline
 
 export const apiModeLabel = useMock ? 'Mock API' : 'Backend API'
-
