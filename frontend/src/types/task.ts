@@ -7,6 +7,18 @@ export type TaskStatus =
 
 export type RetrievalDepth = 'L0' | 'L1' | 'L2'
 
+export type WorkflowPhase =
+  | 'idle'
+  | 'skeleton_llm'
+  | 'skeleton_ready'
+  | 'retrieving_page'
+  | 'llm_page'
+  | 'assembling'
+  | 'saving'
+  | 'regenerating_slide'
+  | 'done'
+  | 'failed'
+
 export interface CreateTaskRequest {
   topic: string
   source_type?: 'short_topic' | 'long_document'
@@ -34,6 +46,21 @@ export interface ClarificationQuestion {
 export interface Clarification {
   questions: ClarificationQuestion[]
   submitted: boolean
+}
+
+export interface Progress {
+  phase: WorkflowPhase
+  current: number | null
+  total: number | null
+  message?: string
+  percent: number | null
+}
+
+export interface OutlineSkeletonSlide {
+  slide_id: string
+  title: string
+  intent: string | null
+  user_notes: string | null
 }
 
 export interface Bullet {
@@ -76,10 +103,13 @@ export interface TaskError {
 
 export interface Task {
   task_id: string
+  schema_version?: string
   status: TaskStatus
   created_at: string
   updated_at: string
   clarification: Clarification | null
+  outline_skeleton: OutlineSkeletonSlide[] | null
   outline: Outline | null
+  progress: Progress | null
   error: TaskError | null
 }

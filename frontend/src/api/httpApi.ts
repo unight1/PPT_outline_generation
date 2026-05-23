@@ -1,6 +1,7 @@
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
+  OutlineSkeletonSlide,
   Task,
 } from '../types/task'
 
@@ -84,6 +85,40 @@ export async function generateOutline(taskId: string): Promise<Task> {
   )
 
   // Keep UI data model simple: immediately fetch latest full snapshot.
+  return getTask(result.task_id)
+}
+
+export async function generateSkeleton(taskId: string): Promise<Task> {
+  const result = await requestJson<{ task_id: string; status: Task['status'] }>(
+    `/api/tasks/${taskId}/skeleton/generate`,
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    },
+  )
+
+  return getTask(result.task_id)
+}
+
+export async function updateSkeleton(
+  taskId: string,
+  slides: OutlineSkeletonSlide[],
+): Promise<Task> {
+  return requestJson<Task>(`/api/tasks/${taskId}/skeleton`, {
+    method: 'PATCH',
+    body: JSON.stringify({ slides }),
+  })
+}
+
+export async function generateSlides(taskId: string): Promise<Task> {
+  const result = await requestJson<{ task_id: string; status: Task['status'] }>(
+    `/api/tasks/${taskId}/slides/generate`,
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    },
+  )
+
   return getTask(result.task_id)
 }
 

@@ -37,8 +37,8 @@ class Settings(BaseSettings):
     generation_hard_timeout_seconds: int = 3600
     # Load embedding/reranker singleton in a background thread so downloads run outside generate().
     retrieval_warmup_on_startup: bool = True
-    task_schema_version: str = "v0.2.0"
-    outline_schema_version: str = "v0.2.0"
+    task_schema_version: str = "v1.0.0"
+    outline_schema_version: str = "v1.0.0"
     retrieval_min_evidence_per_slide: int = 1
     retrieval_min_quality_score: float = 0.45
     retrieval_enable_fallback_deepen: bool = True
