@@ -379,6 +379,36 @@ def _inject_evidence(
             low_confidence_slides.append(title)
 
     outline["evidence_catalog"] = evidence_catalog
+
+    ev_lookup = {ev["evidence_id"]: ev for ev in evidence_catalog}
+    page_evidence_map: list[dict[str, Any]] = []
+    for slide in slides:
+        if not isinstance(slide, dict):
+            continue
+        slide_id = str(slide.get("slide_id") or "")
+        slide_title = str(slide.get("title") or "")
+        ev_to_bullets: dict[str, list[str]] = {}
+        for bullet in slide.get("bullets", []):
+            if not isinstance(bullet, dict):
+                continue
+            bid = str(bullet.get("bullet_id") or "")
+            for eid in bullet.get("evidence_ids", []):
+                ev_to_bullets.setdefault(eid, []).append(bid)
+        evidence_trace: list[dict[str, Any]] = []
+        for eid, bids in ev_to_bullets.items():
+            ev = ev_lookup.get(eid)
+            if not ev:
+                continue
+            entry = dict(ev)
+            entry["bullet_ids"] = bids
+            evidence_trace.append(entry)
+        page_evidence_map.append({
+            "slide_id": slide_id,
+            "slide_title": slide_title,
+            "evidence_trace": evidence_trace,
+        })
+    outline["page_evidence_map"] = page_evidence_map
+
     meta = outline.get("meta", {})
     if isinstance(meta, dict):
         meta["research_mode"] = "page_targeted"
