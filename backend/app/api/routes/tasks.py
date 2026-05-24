@@ -20,6 +20,7 @@ from app.task_store import store_available
 from app.services.document_processing import build_document_profile
 from app.services.generation import should_force_fail
 from app.services.orchestration import generate_outline_with_research
+from app.services.skeleton import generate_outline_skeleton
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = logging.getLogger(__name__)
@@ -41,6 +42,20 @@ class RetrievalDepth(str, Enum):
     l0 = "L0"
     l1 = "L1"
     l2 = "L2"
+
+
+WorkflowPhase = Literal[
+    "idle",
+    "skeleton_llm",
+    "skeleton_ready",
+    "retrieving_page",
+    "llm_page",
+    "assembling",
+    "saving",
+    "regenerating_slide",
+    "done",
+    "failed",
+]
 
 
 class Problem(BaseModel):
@@ -101,6 +116,37 @@ class GenerateResponse(BaseModel):
     idempotent: bool = False
 
 
+class Progress(BaseModel):
+    phase: WorkflowPhase
+    current: int | None = None
+    total: int | None = None
+    message: str = ""
+    percent: int | None = None
+
+
+class OutlineSkeletonSlide(BaseModel):
+    slide_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    intent: str | None = None
+    user_notes: str | None = None
+
+
+class PatchSkeletonRequest(BaseModel):
+    slides: list[OutlineSkeletonSlide] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_slide_ids(self) -> "PatchSkeletonRequest":
+        slide_ids = [slide.slide_id for slide in self.slides]
+        if len(slide_ids) != len(set(slide_ids)):
+            raise ValueError("slide_id must be unique within outline_skeleton")
+        return self
+
+
+class GenerateSlidesRequest(BaseModel):
+    idempotency_key: str | None = None
+    concurrency: int | None = Field(default=None, ge=1, le=3)
+
+
 class ListTasksResponse(BaseModel):
     tasks: list[dict[str, Any]]
     total: int
@@ -118,6 +164,39 @@ GENERATION_EXECUTOR = ThreadPoolExecutor(max_workers=settings.generation_worker_
 
 class GenerationTimeoutError(RuntimeError):
     pass
+
+
+def build_progress(
+    phase: WorkflowPhase,
+    message: str,
+    current: int | None = None,
+    total: int | None = None,
+    percent: int | None = None,
+) -> dict[str, Any]:
+    return Progress(
+        phase=phase,
+        current=current,
+        total=total,
+        message=message,
+        percent=percent,
+    ).model_dump()
+
+
+def update_task_progress(
+    task: dict[str, Any],
+    phase: WorkflowPhase,
+    message: str,
+    current: int | None = None,
+    total: int | None = None,
+    percent: int | None = None,
+) -> None:
+    task["progress"] = build_progress(
+        phase=phase,
+        message=message,
+        current=current,
+        total=total,
+        percent=percent,
+    )
 
 
 def _estimate_page_range(duration_minutes: int) -> str:
@@ -206,6 +285,14 @@ def enqueue_generation(task_id: str) -> Future[None]:
     return GENERATION_EXECUTOR.submit(complete_generation, task_id)
 
 
+def enqueue_skeleton_generation(task_id: str) -> Future[None]:
+    return GENERATION_EXECUTOR.submit(complete_skeleton_generation, task_id)
+
+
+def enqueue_slide_generation(task_id: str) -> Future[None]:
+    return GENERATION_EXECUTOR.submit(complete_slide_generation, task_id)
+
+
 def classify_generation_exception(exc: Exception) -> tuple[str, str, dict[str, Any]]:
     message = str(exc)
     if isinstance(exc, GenerationTimeoutError):
@@ -252,7 +339,7 @@ def validate_task_id(task_id: str) -> None:
 
 
 def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
-    # Keep response shape aligned with api_contract_v0.md.
+    # Keep v0 fields while exposing the v1 workflow fields for new clients.
     return {
         "task_id": task["task_id"],
         "schema_version": task.get("schema_version", settings.task_schema_version),
@@ -260,7 +347,9 @@ def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
         "created_at": task["created_at"],
         "updated_at": task["updated_at"],
         "clarification": task["clarification"],
+        "outline_skeleton": task.get("outline_skeleton"),
         "outline": task["outline"],
+        "progress": task.get("progress"),
         "error": task["error"],
     }
 
@@ -284,9 +373,16 @@ def create_task(payload: CreateTaskRequest) -> CreateTaskResponse:
             "questions": build_default_clarification_questions(payload),
             "submitted": False,
         },
+        "outline_skeleton": None,
         "outline": None,
+        "progress": None,
         "error": None,
-        "runtime": {"generation_attempts": 0, "last_started_at": None, "last_finished_at": None},
+        "runtime": {
+            "workflow": None,
+            "generation_attempts": 0,
+            "last_started_at": None,
+            "last_finished_at": None,
+        },
     }
     persist_task(task)
     logger.info("Task created task_id=%s status=%s", task_id, task["status"])
@@ -364,6 +460,137 @@ def export_tasks_for_evaluation(
     return ListTasksResponse(tasks=snapshots, total=len(snapshots))
 
 
+@router.post("/{task_id:uuid}/skeleton/generate", response_model=GenerateResponse, status_code=status.HTTP_202_ACCEPTED)
+def generate_skeleton(task_id: UUID, payload: GenerateTaskRequest | None = None) -> GenerateResponse:
+    task_id_str = str(task_id)
+    validate_task_id(task_id_str)
+    task = get_task_or_404(task_id_str)
+    if task["status"] == TaskStatus.generating.value:
+        progress = task.get("progress") if isinstance(task.get("progress"), dict) else {}
+        if progress.get("phase") == "skeleton_llm":
+            return GenerateResponse(task_id=task_id_str, status=TaskStatus.generating, accepted=True, idempotent=True)
+        raise build_error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_STATE",
+            "Task is already generating another workflow.",
+            {"status": task["status"], "phase": progress.get("phase")},
+        )
+    if task["status"] not in (TaskStatus.pending.value, TaskStatus.clarifying.value):
+        raise build_error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_STATE",
+            "Skeleton cannot be generated in current state.",
+            {"status": task["status"]},
+        )
+    if not bool(task["clarification"].get("submitted")):
+        raise build_error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_STATE",
+            "Clarification must be submitted before skeleton generation.",
+        )
+
+    runtime = task.get("runtime", {})
+    if not isinstance(runtime, dict):
+        runtime = {}
+    idempotency_key = (payload.idempotency_key if payload else None) or ""
+    task["status"] = TaskStatus.generating.value
+    task["error"] = None
+    task["runtime"] = {
+        **runtime,
+        "workflow": "skeleton",
+        "last_started_at": now_iso(),
+        "last_idempotency_key": idempotency_key or None,
+    }
+    update_task_progress(task, "skeleton_llm", "正在生成可编辑骨架。")
+    task["updated_at"] = now_iso()
+    persist_task(task)
+    enqueue_skeleton_generation(task_id_str)
+    return GenerateResponse(task_id=task_id_str, status=TaskStatus.generating, accepted=True, idempotent=False)
+
+
+@router.patch("/{task_id:uuid}/skeleton")
+def patch_skeleton(task_id: UUID, payload: PatchSkeletonRequest) -> dict[str, Any]:
+    task_id_str = str(task_id)
+    validate_task_id(task_id_str)
+    task = get_task_or_404(task_id_str)
+    if task["status"] == TaskStatus.generating.value:
+        raise build_error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_STATE",
+            "Cannot update skeleton while generation is running.",
+            {"status": task["status"]},
+        )
+    if task["status"] not in (TaskStatus.pending.value, TaskStatus.clarifying.value):
+        raise build_error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_STATE",
+            "Skeleton cannot be updated in current state.",
+            {"status": task["status"]},
+        )
+    if not task.get("outline_skeleton"):
+        raise build_error(status.HTTP_409_CONFLICT, "INVALID_STATE", "Skeleton has not been generated yet.")
+
+    slides = [slide.model_dump() for slide in payload.slides]
+    task["outline_skeleton"] = slides
+    update_task_progress(
+        task,
+        "skeleton_ready",
+        "骨架已更新，请确认后生成完整大纲。",
+        total=len(slides),
+    )
+    task["updated_at"] = now_iso()
+    persist_task(task)
+    return task_snapshot(task)
+
+
+@router.post("/{task_id:uuid}/slides/generate", response_model=GenerateResponse, status_code=status.HTTP_202_ACCEPTED)
+def generate_slides(task_id: UUID, payload: GenerateSlidesRequest | None = None) -> GenerateResponse:
+    task_id_str = str(task_id)
+    validate_task_id(task_id_str)
+    task = get_task_or_404(task_id_str)
+    if task["status"] == TaskStatus.generating.value:
+        progress = task.get("progress") if isinstance(task.get("progress"), dict) else {}
+        if progress.get("phase") in ("retrieving_page", "llm_page", "assembling", "saving"):
+            return GenerateResponse(task_id=task_id_str, status=TaskStatus.generating, accepted=True, idempotent=True)
+        raise build_error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_STATE",
+            "Task is already generating another workflow.",
+            {"status": task["status"], "phase": progress.get("phase")},
+        )
+    if task["status"] != TaskStatus.pending.value:
+        raise build_error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_STATE",
+            "Slides cannot be generated in current state.",
+            {"status": task["status"]},
+        )
+    if not bool(task["clarification"].get("submitted")):
+        raise build_error(status.HTTP_409_CONFLICT, "INVALID_STATE", "Clarification must be submitted first.")
+    skeleton = task.get("outline_skeleton")
+    if not isinstance(skeleton, list) or not skeleton:
+        raise build_error(status.HTTP_409_CONFLICT, "INVALID_STATE", "Skeleton must be generated before slides.")
+
+    runtime = task.get("runtime", {})
+    if not isinstance(runtime, dict):
+        runtime = {}
+    idempotency_key = (payload.idempotency_key if payload else None) or ""
+    task["status"] = TaskStatus.generating.value
+    task["error"] = None
+    task["runtime"] = {
+        **runtime,
+        "workflow": "slides",
+        "last_started_at": now_iso(),
+        "last_idempotency_key": idempotency_key or None,
+        "concurrency": payload.concurrency if payload else None,
+    }
+    update_task_progress(task, "retrieving_page", "正在准备按页生成。", current=0, total=len(skeleton), percent=0)
+    task["updated_at"] = now_iso()
+    persist_task(task)
+    enqueue_slide_generation(task_id_str)
+    return GenerateResponse(task_id=task_id_str, status=TaskStatus.generating, accepted=True, idempotent=False)
+
+
 @router.patch("/{task_id:uuid}/clarification")
 def patch_clarification(task_id: UUID, payload: PatchClarificationRequest) -> dict[str, Any]:
     task_id_str = str(task_id)
@@ -386,11 +613,137 @@ def patch_clarification(task_id: UUID, payload: PatchClarificationRequest) -> di
         task["clarification"]["submitted"] = payload.submitted
     submitted = bool(task["clarification"].get("submitted"))
     task["status"] = TaskStatus.pending.value if submitted else TaskStatus.clarifying.value
+    if submitted and not task.get("outline_skeleton"):
+        update_task_progress(task, "idle", "澄清已提交，可以生成骨架。")
+    elif not submitted:
+        task["progress"] = None
 
     task["updated_at"] = now_iso()
     persist_task(task)
     logger.info("Clarification updated task_id=%s submitted=%s", task_id_str, task["clarification"]["submitted"])
     return task_snapshot(task)
+
+
+def complete_skeleton_generation(task_id: str) -> None:
+    try:
+        task = fetch_task(task_id)
+        if task is None:
+            return
+
+        if should_force_fail(task["input"]["topic"]):
+            raise RuntimeError("Skeleton generation failed by test marker.")
+
+        skeleton = generate_outline_skeleton(task)
+        task["outline_skeleton"] = skeleton
+        task["status"] = TaskStatus.pending.value
+        update_task_progress(
+            task,
+            "skeleton_ready",
+            "骨架已生成，请确认每页主题。",
+            total=len(skeleton),
+            percent=None,
+        )
+        task["error"] = None
+        runtime = task.get("runtime", {})
+        if not isinstance(runtime, dict):
+            runtime = {}
+        runtime["last_finished_at"] = now_iso()
+        task["runtime"] = runtime
+        task["updated_at"] = now_iso()
+        persist_task(task)
+        logger.info("Skeleton completed task_id=%s slides=%s", task_id, len(skeleton))
+    except Exception as exc:
+        logger.exception("Skeleton generation crashed task_id=%s", task_id)
+        task = fetch_task(task_id)
+        if task is not None:
+            task["status"] = TaskStatus.failed.value
+            task["error"] = {
+                "code": "INTERNAL_ERROR",
+                "message": "Skeleton generation failed.",
+                "details": {"retryable": True, "reason": str(exc)},
+            }
+            update_task_progress(task, "failed", "骨架生成失败，请稍后重试。")
+            task["updated_at"] = now_iso()
+            persist_task(task)
+
+
+def _align_outline_to_skeleton(outline: dict[str, Any], skeleton: list[dict[str, Any]]) -> dict[str, Any]:
+    slides = outline.get("slides", [])
+    if not isinstance(slides, list):
+        slides = []
+    aligned: list[dict[str, Any]] = []
+    for idx, skeleton_slide in enumerate(skeleton, start=1):
+        existing = slides[idx - 1] if idx - 1 < len(slides) and isinstance(slides[idx - 1], dict) else {}
+        aligned.append(
+            {
+                "slide_id": str(skeleton_slide.get("slide_id") or f"s{idx}"),
+                "title": str(skeleton_slide.get("title") or existing.get("title") or f"第{idx}页"),
+                "bullets": existing.get("bullets") if isinstance(existing.get("bullets"), list) else [],
+                "speaker_notes": str(existing.get("speaker_notes") or ""),
+            }
+        )
+    outline["slides"] = aligned
+    meta = outline.get("meta", {})
+    if not isinstance(meta, dict):
+        meta = {}
+    meta["schema_version"] = settings.outline_schema_version
+    meta["outline_skeleton_applied"] = True
+    outline["meta"] = meta
+    return outline
+
+
+def complete_slide_generation(task_id: str) -> None:
+    try:
+        task = fetch_task(task_id)
+        if task is None:
+            return
+        skeleton = task.get("outline_skeleton")
+        if not isinstance(skeleton, list) or not skeleton:
+            raise RuntimeError("outline_skeleton is required before slide generation.")
+
+        update_task_progress(task, "llm_page", "正在按骨架生成完整大纲。", current=1, total=len(skeleton), percent=10)
+        task["updated_at"] = now_iso()
+        persist_task(task)
+
+        if should_force_fail(task["input"]["topic"]):
+            raise RuntimeError("Slide generation failed by test marker.")
+
+        outline = generate_outline_with_research(
+            topic=task["input"]["topic"],
+            retrieval_depth=task["input"]["retrieval_depth"],
+            clarification=task.get("clarification"),
+            raw_notes=task["input"].get("raw_notes"),
+            source_type=task["input"].get("source_type", "short_topic"),
+            document_text=task["input"].get("document_text"),
+            document_title=task["input"].get("document_title"),
+            document_profile=task["input"].get("document_profile"),
+        )
+        update_task_progress(task, "assembling", "正在合并每页内容。", current=len(skeleton), total=len(skeleton), percent=90)
+        task["outline"] = _align_outline_to_skeleton(outline, skeleton)
+        task["status"] = TaskStatus.done.value
+        update_task_progress(task, "done", "完整大纲已生成。", current=len(skeleton), total=len(skeleton), percent=100)
+        task["error"] = None
+        runtime = task.get("runtime", {})
+        if not isinstance(runtime, dict):
+            runtime = {}
+        runtime["last_finished_at"] = now_iso()
+        task["runtime"] = runtime
+        task["updated_at"] = now_iso()
+        persist_task(task)
+        logger.info("Slides completed task_id=%s slides=%s", task_id, len(skeleton))
+    except Exception as exc:
+        logger.exception("Slide generation crashed task_id=%s", task_id)
+        task = fetch_task(task_id)
+        if task is not None:
+            task["status"] = TaskStatus.failed.value
+            task["error"] = {
+                "code": "INTERNAL_ERROR",
+                "message": "Slide generation failed.",
+                "details": {"retryable": True, "reason": str(exc)},
+            }
+            update_task_progress(task, "failed", "按页生成失败，请稍后重试。")
+            task["updated_at"] = now_iso()
+            persist_task(task)
 
 
 def complete_generation(task_id: str) -> None:
@@ -407,6 +760,7 @@ def complete_generation(task_id: str) -> None:
                 "message": "Generation failed by test marker.",
                 "details": {"reason": "topic contains [FAIL]"},
             }
+            update_task_progress(task, "failed", "生成失败。")
             task["updated_at"] = now_iso()
             persist_task(task)
             logger.warning("Task failed task_id=%s reason=test-marker", task_id)
@@ -434,6 +788,7 @@ def complete_generation(task_id: str) -> None:
         runtime["last_finished_at"] = now_iso()
         task["runtime"] = runtime
         task["status"] = TaskStatus.done.value
+        update_task_progress(task, "done", "完整大纲已生成。", percent=100)
         task["error"] = None
         task["updated_at"] = now_iso()
         persist_task(task)
@@ -466,6 +821,7 @@ def complete_generation(task_id: str) -> None:
                         "max_retries": max_retries,
                     },
                 }
+                update_task_progress(task, "llm_page", "生成失败，已安排自动重试。")
                 task["runtime"] = runtime
                 task["updated_at"] = now_iso()
                 persist_task(task)
@@ -478,6 +834,7 @@ def complete_generation(task_id: str) -> None:
                     "message": error_message,
                     "details": {**error_details, "retryable": False, "attempts": attempts, "max_retries": max_retries},
                 }
+                update_task_progress(task, "failed", error_message)
             task["updated_at"] = now_iso()
             persist_task(task)
 
@@ -510,11 +867,13 @@ def generate_task(task_id: UUID, payload: GenerateTaskRequest | None = None) -> 
 
     task["status"] = TaskStatus.generating.value
     task["runtime"] = {
+        "workflow": "legacy",
         "generation_attempts": int(runtime.get("generation_attempts", 0)) + 1,
         "last_started_at": now_iso(),
         "last_idempotency_key": idempotency_key or None,
         "last_finished_at": runtime.get("last_finished_at"),
     }
+    update_task_progress(task, "llm_page", "正在生成完整大纲。")
     task["updated_at"] = now_iso()
     persist_task(task)
     logger.info("Task accepted task_id=%s status=%s", task_id_str, task["status"])
@@ -542,6 +901,22 @@ def recover_inflight_generations(limit: int = 100) -> int:
             except ValueError:
                 is_stale = True
 
+        runtime = task.get("runtime", {})
+        if not isinstance(runtime, dict):
+            runtime = {}
+        progress = task.get("progress", {})
+        if not isinstance(progress, dict):
+            progress = {}
+        workflow = str(runtime.get("workflow") or "")
+        phase = str(progress.get("phase") or "")
+        if not workflow:
+            if phase == "skeleton_llm":
+                workflow = "skeleton"
+            elif phase in ("retrieving_page", "llm_page", "assembling", "saving"):
+                workflow = "slides"
+            else:
+                workflow = "legacy"
+
         if is_stale:
             task["status"] = TaskStatus.pending.value
             task["updated_at"] = now_iso()
@@ -550,8 +925,14 @@ def recover_inflight_generations(limit: int = 100) -> int:
                 "message": "Recovered stale generating task, set back to pending.",
                 "details": {"recovered": True},
             }
+            update_task_progress(task, "idle", "已恢复卡住的后台任务，正在重新排队。")
             persist_task(task)
-        enqueue_generation(task_id)
+        if workflow == "skeleton":
+            enqueue_skeleton_generation(task_id)
+        elif workflow == "slides":
+            enqueue_slide_generation(task_id)
+        else:
+            enqueue_generation(task_id)
         recovered += 1
     if recovered:
         logger.warning("Recovered inflight generation tasks count=%s", recovered)

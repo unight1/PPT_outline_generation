@@ -1,20 +1,23 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import type { CreateTaskRequest, Task } from './types/task'
+import type { CreateTaskRequest, OutlineSkeletonSlide, Task } from './types/task'
 import {
   createTask,
-  generateOutline,
+  generateSkeleton,
+  generateSlides,
   getTask,
   submitClarification,
+  updateSkeleton,
   apiModeLabel,
 } from './api'
 
-type ViewName = 'form' | 'status' | 'result'
+type ViewName = 'form' | 'status' | 'skeleton' | 'result'
 
 const view = ref<ViewName>('form')
 const loading = ref(false)
 const errorMessage = ref('')
 const task = ref<Task | null>(null)
+const skeletonSlides = ref<OutlineSkeletonSlide[]>([])
 
 const form = reactive<CreateTaskRequest>({
   topic: '',
@@ -41,6 +44,25 @@ const statusText = computed(() => {
 
   return '尚未创建任务'
 })
+
+const progressText = computed(() => {
+  const progress = task.value?.progress
+  if (!progress) return ''
+  return progress.message || '处理中'
+})
+
+function syncSkeletonFromTask() {
+  skeletonSlides.value = (task.value?.outline_skeleton ?? []).map((slide) => ({
+    ...slide,
+    intent: slide.intent ?? '',
+    user_notes: slide.user_notes ?? '',
+  }))
+}
+
+function enterSkeletonView() {
+  syncSkeletonFromTask()
+  view.value = 'skeleton'
+}
 
 function validateForm() {
   if (!form.topic.trim()) {
@@ -94,6 +116,8 @@ async function handleSubmitClarification() {
 
   try {
     task.value = await submitClarification(task.value.task_id, answers)
+    syncSkeletonFromTask()
+    view.value = 'skeleton'
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '提交澄清失败'
   } finally {
@@ -101,11 +125,54 @@ async function handleSubmitClarification() {
   }
 }
 
-async function handleGenerate() {
+async function pollTaskUntilSettled(
+  options: {
+    done: (latestTask: Task) => boolean
+    onDone?: (latestTask: Task) => void
+    timeoutMessage: string
+  },
+) {
+  if (!task.value) return
+  const taskId = task.value.task_id
+  const pollStart = Date.now()
+  const maxPollMs = 15 * 60 * 1000
+  let pollingInFlight = false
+
+  const timer = window.setInterval(() => {
+    if (pollingInFlight) return
+
+    void (async () => {
+      pollingInFlight = true
+      try {
+        const latestTask = await getTask(taskId)
+        task.value = latestTask
+        syncSkeletonFromTask()
+
+        if (latestTask.status === 'failed' || options.done(latestTask)) {
+          window.clearInterval(timer)
+          loading.value = false
+          options.onDone?.(latestTask)
+        } else if (Date.now() - pollStart > maxPollMs) {
+          window.clearInterval(timer)
+          loading.value = false
+          errorMessage.value = `${options.timeoutMessage}（当前状态：${latestTask.status}），请稍后刷新任务状态。`
+        }
+      } catch (error) {
+        window.clearInterval(timer)
+        loading.value = false
+        errorMessage.value = error instanceof Error ? error.message : '轮询任务状态失败'
+      } finally {
+        pollingInFlight = false
+      }
+    })()
+  }, 1200)
+}
+
+async function handleGenerateSkeleton() {
   if (!task.value) return
 
   if (task.value.clarification && !task.value.clarification.submitted) {
-    errorMessage.value = '请先提交需求澄清，再触发大纲生成。'
+    errorMessage.value = '请先提交需求澄清，再生成骨架。'
     return
   }
 
@@ -113,46 +180,75 @@ async function handleGenerate() {
   errorMessage.value = ''
 
   try {
-    task.value = await generateOutline(task.value.task_id)
-    const pollStart = Date.now()
-    const maxPollMs = 15 * 60 * 1000
-    let pollingInFlight = false
-
-    const timer = window.setInterval(() => {
-      if (!task.value) return
-      if (pollingInFlight) return
-
-      void (async () => {
-        pollingInFlight = true
-        try {
-          const latestTask = await getTask(task.value!.task_id)
-          task.value = latestTask
-
-          if (latestTask.status === 'done' || latestTask.status === 'failed') {
-            window.clearInterval(timer)
-            loading.value = false
-
-            if (latestTask.status === 'done') {
-              view.value = 'result'
-            }
-          } else if (Date.now() - pollStart > maxPollMs) {
-            window.clearInterval(timer)
-            loading.value = false
-            errorMessage.value = `轮询超时（当前状态：${latestTask.status}），请稍后刷新任务状态。`
-          }
-        } catch (error) {
-          window.clearInterval(timer)
-          loading.value = false
-          errorMessage.value = error instanceof Error ? error.message : '轮询任务状态失败'
-        } finally {
-          pollingInFlight = false
-        }
-      })()
-    }, 1200)
+    task.value = await generateSkeleton(task.value.task_id)
+    await pollTaskUntilSettled({
+      done: (latestTask) => latestTask.status === 'pending' && Boolean(latestTask.outline_skeleton?.length),
+      timeoutMessage: '骨架生成轮询超时',
+    })
   } catch (error) {
     loading.value = false
-    errorMessage.value = error instanceof Error ? error.message : '生成失败'
+    errorMessage.value = error instanceof Error ? error.message : '骨架生成失败'
   }
+}
+
+async function handleSaveSkeleton() {
+  if (!task.value) return
+  if (!skeletonSlides.value.length) {
+    errorMessage.value = '请先生成骨架'
+    return
+  }
+
+  loading.value = true
+  errorMessage.value = ''
+
+  try {
+    task.value = await updateSkeleton(task.value.task_id, skeletonSlides.value)
+    syncSkeletonFromTask()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '保存骨架失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function handleGenerateSlides() {
+  if (!task.value) return
+  if (!skeletonSlides.value.length) {
+    errorMessage.value = '请先生成并确认骨架'
+    return
+  }
+
+  loading.value = true
+  errorMessage.value = ''
+
+  try {
+    task.value = await updateSkeleton(task.value.task_id, skeletonSlides.value)
+    task.value = await generateSlides(task.value.task_id)
+    await pollTaskUntilSettled({
+      done: (latestTask) => latestTask.status === 'done',
+      onDone: (latestTask) => {
+        if (latestTask.status === 'done') view.value = 'result'
+      },
+      timeoutMessage: '按页生成轮询超时',
+    })
+  } catch (error) {
+    loading.value = false
+    errorMessage.value = error instanceof Error ? error.message : '按页生成失败'
+  }
+}
+
+function addSkeletonSlide() {
+  const next = skeletonSlides.value.length + 1
+  skeletonSlides.value.push({
+    slide_id: `s${next}`,
+    title: `新增页面 ${next}`,
+    intent: '',
+    user_notes: '',
+  })
+}
+
+function removeSkeletonSlide(index: number) {
+  skeletonSlides.value.splice(index, 1)
 }
 
 function restart() {
@@ -168,6 +264,7 @@ function restart() {
   form.raw_notes = ''
   form.document_title = ''
   form.document_text = ''
+  skeletonSlides.value = []
 }
 </script>
 
@@ -183,7 +280,7 @@ function restart() {
 
     <section class="steps">
       <div :class="['step', view === 'form' && 'active']">1. 填写需求</div>
-      <div :class="['step', view === 'status' && 'active']">2. 任务状态</div>
+      <div :class="['step', (view === 'status' || view === 'skeleton') && 'active']">2. 骨架确认</div>
       <div :class="['step', view === 'result' && 'active']">3. 大纲结果</div>
     </section>
 
@@ -277,8 +374,8 @@ function restart() {
       </div>
 
       <div class="actions">
-        <button :disabled="loading" @click="handleGenerate">
-          {{ task.status === 'generating' ? '生成中...' : '触发大纲生成' }}
+        <button :disabled="loading || !task.clarification?.submitted" @click="enterSkeletonView">
+          进入骨架确认
         </button>
 
         <button class="secondary" @click="restart">重新开始</button>
@@ -287,6 +384,73 @@ function restart() {
       <p v-if="task.status === 'generating'" class="hint">
         正在轮询后端任务状态，通常在数十秒到数分钟内完成（视模型与检索耗时而定）。
       </p>
+      <div v-if="task.status === 'failed'" class="failed-box">
+        <strong>任务失败</strong>
+        <p>错误码：{{ task.error?.code ?? 'UNKNOWN' }}</p>
+        <p>错误信息：{{ task.error?.message ?? '后端未返回错误信息' }}</p>
+      </div>
+    </section>
+
+    <section v-if="view === 'skeleton' && task" class="card">
+      <h2>骨架确认</h2>
+
+      <div class="status-box">
+        <strong>{{ statusText }}</strong>
+        <span>任务 ID：{{ task.task_id }}</span>
+      </div>
+
+      <p v-if="progressText" class="hint">{{ progressText }}</p>
+      <div v-if="task.progress?.percent !== null && task.progress?.percent !== undefined" class="progress-bar">
+        <div class="progress-fill" :style="{ width: `${task.progress.percent}%` }" />
+      </div>
+
+      <div v-if="!skeletonSlides.length" class="empty-box">
+        <p>提交澄清后先生成 PPT 页级骨架，确认每页主题后再按页生成完整内容。</p>
+        <button :disabled="loading || task.status === 'generating'" @click="handleGenerateSkeleton">
+          {{ task.status === 'generating' ? '骨架生成中...' : '生成骨架' }}
+        </button>
+      </div>
+
+      <div v-else class="skeleton-list">
+        <article
+          v-for="(slide, index) in skeletonSlides"
+          :key="slide.slide_id"
+          class="skeleton-slide"
+        >
+          <div class="skeleton-heading">
+            <strong>第 {{ index + 1 }} 页 / {{ slide.slide_id }}</strong>
+            <button class="secondary danger" type="button" @click="removeSkeletonSlide(index)">
+              删除
+            </button>
+          </div>
+
+          <label>
+            页面标题
+            <input v-model="slide.title" />
+          </label>
+
+          <label>
+            页面意图
+            <textarea v-model="slide.intent" />
+          </label>
+
+          <label>
+            补充要求
+            <textarea v-model="slide.user_notes" placeholder="可写给后续按页生成的额外要求" />
+          </label>
+        </article>
+
+        <div class="actions">
+          <button class="secondary" type="button" @click="addSkeletonSlide">新增页面</button>
+          <button :disabled="loading" type="button" @click="handleSaveSkeleton">
+            {{ loading ? '保存中...' : '保存骨架' }}
+          </button>
+          <button :disabled="loading || task.status === 'generating'" type="button" @click="handleGenerateSlides">
+            {{ task.status === 'generating' ? '生成中...' : '按页生成完整大纲' }}
+          </button>
+        </div>
+      </div>
+
       <div v-if="task.status === 'failed'" class="failed-box">
         <strong>任务失败</strong>
         <p>错误码：{{ task.error?.code ?? 'UNKNOWN' }}</p>
@@ -461,6 +625,10 @@ button.secondary {
   color: #172033;
 }
 
+button.danger {
+  color: #991b1b;
+}
+
 .required,
 .error {
   color: #d72d2d;
@@ -486,6 +654,37 @@ button.secondary {
 
 .hint {
   color: #5d6b82;
+}
+
+.progress-bar {
+  overflow: hidden;
+  height: 8px;
+  margin-top: 12px;
+  border-radius: 999px;
+  background: #e5eaf3;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #2864d8;
+  transition: width 0.2s ease;
+}
+
+.empty-box,
+.skeleton-slide {
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid #e3e8f0;
+  border-radius: 14px;
+  background: #fbfcff;
+}
+
+.skeleton-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
 }
 
 .slide {

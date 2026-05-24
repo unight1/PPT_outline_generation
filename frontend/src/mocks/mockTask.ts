@@ -25,7 +25,9 @@ export const mockTaskClarifying: Task = {
       },
     ],
   },
+  outline_skeleton: null,
   outline: null,
+  progress: null,
   error: null,
 }
 
@@ -54,6 +56,26 @@ export const mockTaskDone: Task = {
       },
     ],
   },
+  outline_skeleton: [
+    {
+      slide_id: 's1',
+      title: '项目背景',
+      intent: '说明为什么要做这个系统',
+      user_notes: null,
+    },
+    {
+      slide_id: 's2',
+      title: '系统目标',
+      intent: '说明系统要解决的问题和价值',
+      user_notes: null,
+    },
+    {
+      slide_id: 's3',
+      title: '核心流程',
+      intent: '说明前后端与 RAG 的协作流程',
+      user_notes: null,
+    },
+  ],
   outline: {
     title: '基于 RAG 的 PPT 大纲智能生成系统',
     slides: [
@@ -139,6 +161,13 @@ export const mockTaskDone: Task = {
       retrieval_depth: 'L1',
       generated_at: '2026-04-15T10:10:00+08:00',
     },
+  },
+  progress: {
+    phase: 'done',
+    current: 3,
+    total: 3,
+    message: '完整大纲已生成。',
+    percent: 100,
   },
   error: null,
 }

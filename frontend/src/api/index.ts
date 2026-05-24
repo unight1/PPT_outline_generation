@@ -11,6 +11,15 @@ export const submitClarification = useMock
 export const generateOutline = useMock
   ? mockApi.generateOutline
   : httpApi.generateOutline
+export const generateSkeleton = useMock
+  ? mockApi.generateSkeleton
+  : httpApi.generateSkeleton
+export const updateSkeleton = useMock
+  ? mockApi.updateSkeleton
+  : httpApi.updateSkeleton
+export const generateSlides = useMock
+  ? mockApi.generateSlides
+  : httpApi.generateSlides
 
 export const apiModeLabel = useMock ? 'Mock API' : 'Backend API'
 

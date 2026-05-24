@@ -19,6 +19,11 @@ def _sync_enqueue(task_id: str) -> Future[None]:
     return _done_future()
 
 
+def _sync_enqueue_skeleton(task_id: str) -> Future[None]:
+    tasks_route.complete_skeleton_generation(task_id)
+    return _done_future()
+
+
 def setup_function() -> None:
     tasks_route.TASK_STORE.clear()
     tasks_route.USE_DB_STORE = False
@@ -117,6 +122,53 @@ def test_submit_clarification_then_generate_done() -> None:
     finally:
         tasks_route.enqueue_generation = old_enqueue
         tasks_route.generate_outline_with_research = old_orch
+
+
+def test_generate_and_patch_outline_skeleton() -> None:
+    client = TestClient(app)
+    create = client.post("/api/tasks", json={"topic": "AI PPT", "retrieval_depth": "L0"}).json()
+    task_id = create["task_id"]
+    client.patch(
+        f"/api/tasks/{task_id}/clarification",
+        json={
+            "answers": [
+                {"question_id": "goal", "answer": "说明系统价值"},
+                {"question_id": "page_range", "answer": "6 页"},
+            ],
+            "submitted": True,
+        },
+    )
+
+    old_enqueue = tasks_route.enqueue_skeleton_generation
+    tasks_route.enqueue_skeleton_generation = _sync_enqueue_skeleton
+    try:
+        generate = client.post(f"/api/tasks/{task_id}/skeleton/generate", json={})
+        assert generate.status_code == 202
+        task = client.get(f"/api/tasks/{task_id}").json()
+        assert task["status"] == "pending"
+        assert task["progress"]["phase"] == "skeleton_ready"
+        assert len(task["outline_skeleton"]) == 6
+
+        slides = task["outline_skeleton"]
+        slides[0]["title"] = "用户确认后的第一页"
+        slides[0]["user_notes"] = "强调课程项目背景"
+        patch = client.patch(f"/api/tasks/{task_id}/skeleton", json={"slides": slides})
+        assert patch.status_code == 200
+        patched = patch.json()
+        assert patched["outline_skeleton"][0]["title"] == "用户确认后的第一页"
+        assert patched["outline_skeleton"][0]["user_notes"] == "强调课程项目背景"
+    finally:
+        tasks_route.enqueue_skeleton_generation = old_enqueue
+
+
+def test_generate_skeleton_requires_submitted_clarification() -> None:
+    client = TestClient(app)
+    create = client.post("/api/tasks", json={"topic": "AI PPT", "retrieval_depth": "L0"}).json()
+    task_id = create["task_id"]
+
+    resp = client.post(f"/api/tasks/{task_id}/skeleton/generate", json={})
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "INVALID_STATE"
 
 
 def test_patch_clarification_rejected_after_done() -> None:
