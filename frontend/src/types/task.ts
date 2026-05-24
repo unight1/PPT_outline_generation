@@ -90,8 +90,10 @@ export interface Outline {
   slides: Slide[]
   evidence_catalog: Evidence[]
   meta: {
-    retrieval_depth: RetrievalDepth
-    generated_at: string
+    retrieval_depth?: RetrievalDepth
+    generated_at?: string
+    schema_version?: string
+    [key: string]: unknown
   }
 }
 

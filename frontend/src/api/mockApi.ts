@@ -1,6 +1,7 @@
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
+  Outline,
   OutlineSkeletonSlide,
   Task,
 } from '../types/task'
@@ -202,6 +203,25 @@ export async function updateSkeleton(
       message: '骨架已更新，请确认后生成完整大纲。',
       percent: null,
     },
+  }
+
+  return currentTask
+}
+
+export async function saveOutline(
+  taskId: string,
+  outline: Outline,
+): Promise<Task> {
+  await sleep(600)
+
+  if (!currentTask || currentTask.task_id !== taskId) {
+    throw new Error('任务不存在')
+  }
+
+  currentTask = {
+    ...currentTask,
+    outline,
+    updated_at: new Date().toISOString(),
   }
 
   return currentTask

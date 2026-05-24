@@ -1,6 +1,7 @@
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
+  Outline,
   OutlineSkeletonSlide,
   Task,
 } from '../types/task'
@@ -122,3 +123,16 @@ export async function generateSlides(taskId: string): Promise<Task> {
   return getTask(result.task_id)
 }
 
+export async function saveOutline(
+  taskId: string,
+  outline: Outline,
+): Promise<Task> {
+  return requestJson<Task>(`/api/tasks/${taskId}/outline`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      title: outline.title,
+      slides: outline.slides,
+      evidence_catalog: outline.evidence_catalog,
+    }),
+  })
+}
