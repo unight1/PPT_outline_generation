@@ -403,15 +403,15 @@ function restart() {
         </label>
 
         <button :disabled="loading" @click="handleSubmitClarification">
-          {{ loading ? '提交中...' : '提交澄清' }}
+          {{ loading ? '提交中...' : '提交澄清，进入骨架确认' }}
         </button>
       </div>
 
-      <div class="actions">
-        <button :disabled="loading || !task.clarification?.submitted" @click="enterSkeletonView">
-          进入骨架确认
-        </button>
-
+      <div v-if="task.clarification?.submitted" class="actions">
+        <button :disabled="loading" @click="enterSkeletonView">继续：骨架确认</button>
+        <button class="secondary" @click="restart">重新开始</button>
+      </div>
+      <div v-else class="actions">
         <button class="secondary" @click="restart">重新开始</button>
       </div>
 

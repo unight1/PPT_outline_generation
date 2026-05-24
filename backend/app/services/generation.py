@@ -79,20 +79,10 @@ def _outline_prompt(topic: str, retrieval_depth: str, target_pages: int) -> str:
         {{
           "bullet_id": "s1-b1",
           "text": "string",
-          "evidence_ids": ["ev_1"]
+          "evidence_ids": []
         }}
       ],
       "speaker_notes": "string"
-    }}
-  ],
-  "evidence_catalog": [
-    {{
-      "evidence_id": "ev_1",
-      "snippet": "string",
-      "source_id": "string",
-      "locator": "string",
-      "score": 0.0,
-      "confidence": 0.0
     }}
   ],
   "meta": {{
@@ -108,7 +98,7 @@ def _outline_prompt(topic: str, retrieval_depth: str, target_pages: int) -> str:
 4) bullet 要覆盖：关键结论、原因/机制、可执行动作、风险或边界（按页选择）；
 5) 每页 speaker_notes 必须是 2-4 句可讲述话术，说明“这页要讲什么、怎么过渡到下一页”；
 6) 至少 2 页包含“数据/案例/对比”类型要点（可用行业通用范围表达，避免编造精确不可验证数字）；
-7) evidence_catalog 优先给出可追溯证据；若没有可靠证据，可为空数组，但 bullets 中 evidence_ids 需保持为空数组；
+7) 所有 bullets 中 evidence_ids 均输出空数组 []，证据由后端检索后注入，禁止 LLM 自行编造引用；
 8) 页面标题要有信息量，不要仅写“背景/方案/总结”这类过泛词，建议写成“结论+对象”形式；
 9) 不要输出 Markdown，不要输出解释文字，只输出 JSON。
 10) 严禁编造事实、来源、统计值、年份、机构结论；若输入中没有可核验依据，必须使用“趋势/常见现象/可能风险”等非定量表达；

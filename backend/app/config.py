@@ -41,7 +41,14 @@ class Settings(BaseSettings):
     outline_schema_version: str = "v1.0.0"
     retrieval_min_evidence_per_slide: int = 1
     retrieval_min_quality_score: float = 0.45
-    retrieval_enable_fallback_deepen: bool = True
+    # A1: default off — secondary depth expansion adds latency and is rarely needed.
+    retrieval_enable_fallback_deepen: bool = False
+    # A1: max concurrent page retrievals (asyncio.gather). Keep ≤ 3 to avoid OOM on CPU.
+    retrieval_parallel_pages: int = 3
+    # A1: allow Tavily web search at all (requires TAVILY_API_KEY).
+    retrieval_tavily_enabled: bool = True
+    # A1: limit Tavily calls per generate run; 0 = unlimited (not recommended).
+    retrieval_tavily_max_pages: int = 2
 
 
 settings = Settings()

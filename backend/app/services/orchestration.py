@@ -289,36 +289,68 @@ def _retrieve_for_slides(
     min_quality_score: float,
     document_segments: list[str] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
+    # A1: Tavily can be disabled globally or capped per run.
+    tavily_key = settings.tavily_api_key or ""
+    if not settings.retrieval_tavily_enabled:
+        tavily_key = ""
+
     retriever = get_retriever(
         documents_dir=settings.retrieval_documents_dir,
         chroma_persist_dir=settings.retrieval_chroma_dir,
-        tavily_api_key=settings.tavily_api_key or "",
+        tavily_api_key=tavily_key,
     )
     clarification_text = _clarification_text(clarification)
     segments = [segment.strip() for segment in (document_segments or []) if isinstance(segment, str) and segment.strip()]
 
+    # A1: track how many pages have already used Tavily this run.
+    tavily_used: list[int] = [0]
+    tavily_max = settings.retrieval_tavily_max_pages if settings.retrieval_tavily_enabled else 0
+
+    async def _retrieve_one(
+        slide_idx: int,
+        slide_title: str,
+        depth: RetrievalDepth,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        segment_context = _segment_context_for_slide(segments, slide_idx) if segments else ""
+        query = _build_retrieval_query(
+            topic=topic,
+            slide_title=slide_title,
+            clarification_text=clarification_text,
+            segment_context=segment_context,
+        )
+        # A1: disable web search for this page when the global Tavily budget is exhausted.
+        use_web = tavily_max == 0 or tavily_used[0] < tavily_max
+        if not use_web:
+            # Temporarily patch retriever to skip web search for this call by using L0 depth.
+            local_depth = RetrievalDepth("L0")
+        else:
+            local_depth = depth
+            if use_web and tavily_max > 0:
+                tavily_used[0] += 1
+
+        result = await retriever.retrieve(RetrievalRequest(query=query, depth=local_depth))
+        selected: list[dict[str, Any]] = []
+        for hit in result.hits:
+            payload = hit.model_dump()
+            payload["quality"] = _hit_quality(payload)
+            if payload["quality"] >= min_quality_score:
+                selected.append(payload)
+            if len(selected) >= 3:
+                break
+        return slide_title, selected
+
     async def _run() -> dict[str, list[dict[str, Any]]]:
-        by_slide: dict[str, list[dict[str, Any]]] = {}
         depth = RetrievalDepth(retrieval_depth)
-        for slide_idx, slide_title in enumerate(slide_titles):
-            segment_context = _segment_context_for_slide(segments, slide_idx) if segments else ""
-            query = _build_retrieval_query(
-                topic=topic,
-                slide_title=slide_title,
-                clarification_text=clarification_text,
-                segment_context=segment_context,
-            )
-            result = await retriever.retrieve(RetrievalRequest(query=query, depth=depth))
-            selected: list[dict[str, Any]] = []
-            for hit in result.hits:
-                payload = hit.model_dump()
-                payload["quality"] = _hit_quality(payload)
-                if payload["quality"] >= min_quality_score:
-                    selected.append(payload)
-                if len(selected) >= 3:
-                    break
-            by_slide[slide_title] = selected
-        return by_slide
+        semaphore = asyncio.Semaphore(max(1, settings.retrieval_parallel_pages))
+
+        async def _bounded(slide_idx: int, slide_title: str) -> tuple[str, list[dict[str, Any]]]:
+            async with semaphore:
+                return await _retrieve_one(slide_idx, slide_title, depth)
+
+        # A1: all pages retrieved concurrently (bounded by semaphore).
+        tasks = [_bounded(i, title) for i, title in enumerate(slide_titles)]
+        results = await asyncio.gather(*tasks)
+        return dict(results)
 
     return asyncio.run(_run())
 
