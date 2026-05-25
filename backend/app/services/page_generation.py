@@ -54,28 +54,51 @@ def retrieve_for_pages(
     retrieval_depth: str,
     skeleton: list[dict],
     clarification: dict | None,
-) -> tuple[dict[str, list[dict]], list[dict]]:
-    """Retrieve evidence for all pages. Returns (by_slide, all_evidence_catalog)."""
+) -> dict[str, list[dict]]:
+    """Retrieve evidence for all pages with bounded concurrency and Tavily budget."""
     retriever = get_retriever(
         documents_dir=settings.retrieval_documents_dir,
         chroma_persist_dir=settings.retrieval_chroma_dir,
-        tavily_api_key=settings.tavily_api_key or "",
+        tavily_api_key=(settings.tavily_api_key or "") if settings.retrieval_tavily_enabled else "",
     )
     clarification_text = _clarification_text(clarification)
     depth = RetrievalDepth(retrieval_depth)
+    tavily_max = settings.retrieval_tavily_max_pages if settings.retrieval_tavily_enabled else 0
+    tavily_used = 0
 
     by_slide: dict[str, list[dict]] = {}
 
     async def _run():
-        for slide in skeleton:
+        nonlocal tavily_used
+        semaphore = asyncio.Semaphore(max(1, settings.retrieval_parallel_pages))
+        tavily_lock = asyncio.Lock()
+
+        async def _retrieve_one(slide: dict) -> tuple[str, list[dict]]:
+            nonlocal tavily_used
             slide_id = str(slide.get("slide_id") or "")
             query = _build_page_query(topic, slide, clarification_text)
-            result = await retriever.retrieve(RetrievalRequest(query=query, depth=depth))
+            async with tavily_lock:
+                use_web = bool(settings.tavily_api_key) and (
+                    settings.retrieval_tavily_enabled
+                    and (tavily_max == 0 or tavily_used < tavily_max)
+                )
+                if use_web and tavily_max > 0:
+                    tavily_used += 1
+            local_depth = depth if use_web else RetrievalDepth("L0")
+            result = await retriever.retrieve(RetrievalRequest(query=query, depth=local_depth))
             selected: list[dict] = []
             for hit in result.hits:
                 selected.append(hit.model_dump())
                 if len(selected) >= 3:
                     break
+            return slide_id, selected
+
+        async def _bounded(slide: dict) -> tuple[str, list[dict]]:
+            async with semaphore:
+                return await _retrieve_one(slide)
+
+        results = await asyncio.gather(*[_bounded(slide) for slide in skeleton])
+        for slide_id, selected in results:
             by_slide[slide_id] = selected
 
     asyncio.run(_run())
@@ -93,11 +116,10 @@ def _build_page_prompt(
     user_notes = str(slide.get("user_notes") or "")
 
     evidence_lines: list[str] = []
-    for ev in evidence_hits:
-        eid = ev.get("evidence_id", "")
+    for idx, ev in enumerate(evidence_hits, start=1):
         snippet = str(ev.get("snippet") or "")[:300]
         source = str(ev.get("source_id") or "unknown")
-        evidence_lines.append(f"- {eid}: {snippet}  (来源：{source})")
+        evidence_lines.append(f"- 参考{idx}: {snippet}  (来源：{source})")
     evidence_block = "\n".join(evidence_lines) if evidence_lines else "（无参考资料）"
 
     return f"""你是PPT大纲助手。根据以下信息为指定页面生成bullets和讲者备注。
@@ -110,21 +132,21 @@ def _build_page_prompt(
 - 页面意图：{intent or "无"}
 - 用户补充要求：{user_notes or "无"}
 
-## 参考资料（可选择引用，在 evidence_ids 中填入对应 ID）
+## 参考资料（仅用于理解内容，证据引用由后端统一注入）
 {evidence_block}
 
 ## 输出要求
 只输出一个JSON对象：
 {{
   "bullets": [
-    {{"bullet_id": "{slide_id}-b1", "text": "要点内容", "evidence_ids": ["ev_1"]}}
+    {{"bullet_id": "{slide_id}-b1", "text": "要点内容", "evidence_ids": []}}
   ],
   "speaker_notes": "讲者备注"
 }}
 
 硬性要求：
 1) bullets 至少 2 个，最多 6 个；
-2) 每个 bullet 可引用 0-1 个 evidence_id，仅在内容确实来自某条证据时引用；
+2) 所有 bullets 的 evidence_ids 必须输出空数组 []，禁止自行编造或填写证据 ID；
 3) 不要输出 Markdown，不要输出解释文字，只输出 JSON。"""
 
 
@@ -188,13 +210,10 @@ def _generate_single_page(
     for jdx, bullet in enumerate(bullets_in[:6], start=1):
         if not isinstance(bullet, dict):
             continue
-        eids = bullet.get("evidence_ids", [])
-        if not isinstance(eids, list):
-            eids = []
         bullets.append({
             "bullet_id": str(bullet.get("bullet_id") or f"{slide_id}-b{jdx}"),
             "text": str(bullet.get("text") or "待补充要点"),
-            "evidence_ids": [str(e) for e in eids],
+            "evidence_ids": [],
         })
     if len(bullets) < 2:
         bullets.append({"bullet_id": f"{slide_id}-b{len(bullets)+1}", "text": "待补充要点", "evidence_ids": []})
@@ -236,10 +255,20 @@ def merge_pages_to_outline(
         page = page_results.get(slide_id)
         if page is None:
             page = _stub_page(slide)
+        hits = retrieval_by_slide.get(slide_id, [])
+        known_ids = [str(hit.get("evidence_id") or "") for hit in hits if str(hit.get("evidence_id") or "")]
+        bullets = page.get("bullets", [])
+        if isinstance(bullets, list):
+            for idx, bullet in enumerate(bullets):
+                if not isinstance(bullet, dict):
+                    continue
+                if known_ids:
+                    bullet["evidence_ids"] = [known_ids[min(idx, len(known_ids) - 1)]]
+                else:
+                    bullet["evidence_ids"] = []
         slides.append(page)
 
         # Collect evidence for this page
-        hits = retrieval_by_slide.get(slide_id, [])
         for hit in hits:
             evidence_catalog.append({
                 "evidence_id": str(hit.get("evidence_id") or ""),

@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.api.routes import tasks as tasks_route
+from app.services import page_generation
 from app.services.page_generation import (
     _build_page_prompt,
     _build_page_query,
@@ -157,12 +158,12 @@ def test_build_page_prompt_includes_evidence() -> None:
         {"evidence_id": "ev_2", "snippet": "ML应用广泛", "source_id": "https://example.com", "locator": "Web"},
     ]
     prompt = _build_page_prompt("AI教育", slide, evidence)
-    assert "ev_1" in prompt
     assert "AI改变教育模式" in prompt
     assert "paper.pdf" in prompt
-    assert "ev_2" in prompt
     assert "https://example.com" in prompt
     assert "s1-b1" in prompt  # bullet_id template
+    assert '"evidence_ids": []' in prompt
+    assert "禁止自行编造或填写证据 ID" in prompt
 
 
 def test_build_page_prompt_no_evidence() -> None:
@@ -178,6 +179,51 @@ def test_build_page_prompt_intent_and_notes_included() -> None:
     prompt = _build_page_prompt("主题", slide, [])
     assert "介绍背景" in prompt
     assert "加入案例" in prompt
+
+
+def test_retrieve_for_pages_uses_parallel_budgeted_tavily(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _Hit:
+        def __init__(self, idx: int) -> None:
+            self.idx = idx
+
+        def model_dump(self) -> dict:
+            return {
+                "snippet": f"证据{self.idx}",
+                "source_id": "local",
+                "locator": "L1",
+                "score": 0.8,
+                "confidence": 0.8,
+            }
+
+    class _Result:
+        def __init__(self, idx: int) -> None:
+            self.hits = [_Hit(idx)]
+
+    class _Retriever:
+        def __init__(self) -> None:
+            self.depths: list[str] = []
+
+        async def retrieve(self, request):  # type: ignore[no-untyped-def]
+            self.depths.append(request.depth.value)
+            return _Result(len(self.depths))
+
+    retriever = _Retriever()
+    monkeypatch.setattr(page_generation, "get_retriever", lambda **_: retriever)
+    monkeypatch.setattr(page_generation.settings, "tavily_api_key", "tvly-test")
+    monkeypatch.setattr(page_generation.settings, "retrieval_tavily_enabled", True)
+    monkeypatch.setattr(page_generation.settings, "retrieval_tavily_max_pages", 2)
+    monkeypatch.setattr(page_generation.settings, "retrieval_parallel_pages", 3)
+
+    skeleton = [
+        {"slide_id": "s1", "title": "页1"},
+        {"slide_id": "s2", "title": "页2"},
+        {"slide_id": "s3", "title": "页3"},
+    ]
+    result = page_generation.retrieve_for_pages("主题", "L1", skeleton, None)
+
+    assert set(result) == {"s1", "s2", "s3"}
+    assert retriever.depths.count("L1") == 2
+    assert retriever.depths.count("L0") == 1
 
 
 # ── _clarification_text ─────────────────────────────────────
@@ -305,6 +351,25 @@ def test_slides_generate_respects_concurrency_param() -> None:
         client = TestClient(app)
         client.post(f"/api/tasks/{task_id}/slides/generate", json={"concurrency": 3})
         assert captured_concurrency == [3]
+    finally:
+        tasks_route.enqueue_slides_generation = old_enqueue
+
+
+def test_slides_generate_defaults_concurrency_when_payload_empty() -> None:
+    task_id = _make_task_in_memory(
+        status="pending",
+        outline_skeleton=[{"slide_id": "s1", "title": "页1", "intent": "", "user_notes": ""}],
+        clarification={"questions": [], "submitted": True},
+    )
+    captured_concurrency = []
+    old_enqueue = tasks_route.enqueue_slides_generation
+    tasks_route.enqueue_slides_generation = lambda tid, c: captured_concurrency.append(c)  # type: ignore[assignment]
+    try:
+        client = TestClient(app)
+        resp = client.post(f"/api/tasks/{task_id}/slides/generate", json={})
+        assert resp.status_code == 202
+        assert captured_concurrency == [2]
+        assert tasks_route.TASK_STORE[task_id]["runtime"]["concurrency"] == 2
     finally:
         tasks_route.enqueue_slides_generation = old_enqueue
 

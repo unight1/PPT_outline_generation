@@ -1,0 +1,164 @@
+================================================================================
+  第 9 周 — 四人分工（质量强化与可用性提升）
+================================================================================
+  契约：延续 docs/api_contract_v1.md；本周如新增字段，先在本文件“共同遵守”中约定。
+  说明：覆盖 7 个方向：增量展示、内容结构增强、RAG 清洗、RAG 匹配、生成加速、
+        错误重试、结果导出。共 12 个模块，按 3+3+3+3 分配。
+  联调：各自模块完成后，用真实后端 + 真实 LLM 跑一条 5～8 页主题链路验证。
+
+================================================================================
+  成员 1（3 项）— 按页增量展示闭环
+================================================================================
+
+  【A1】后端·按页增量保存
+    验收：完整生成时，每完成 1 页，GET /api/tasks/{id} 能看到 outline.slides 中新增/更新该页；
+          未完成页不阻塞已完成页展示。
+    要做：调整 page_generation 生成流程；每页 LLM 完成后回调 persist_task；
+          outline 初始化为 partial 状态；最终 assembling 后转 done。
+    文件：backend/app/services/page_generation.py
+          backend/app/api/routes/tasks.py
+          backend/app/task_store.py
+
+  【A2】后端·增量状态字段
+    验收：progress 能表达 total/current、当前 slide_id、已完成页数、失败页数；
+          前端不用猜测哪些页已完成。
+    要做：扩展 progress 或 runtime 中的增量字段；保持旧字段兼容；
+          单页失败时保留 stub 或 failed 标记，整体可继续。
+    文件：backend/app/api/routes/tasks.py
+          frontend/src/types/task.ts
+
+  【C1】前端·生成中提前展示页面
+    验收：按页生成过程中，已完成页面实时出现在结果/生成中视图；
+          未完成页面显示「生成中」占位；全部完成后自动进入最终结果。
+    要做：轮询 GET task 时读取 partial outline；新增生成中结果区；
+          不再必须等待 status=done 才展示 slides。
+    文件：frontend/src/App.vue
+          frontend/src/types/task.ts
+          frontend/src/api/mockApi.ts
+
+================================================================================
+  成员 2（3 项）— 内容结构增强 + 检索 query
+================================================================================
+
+  【B1】后端·页面内容结构增强
+    验收：每页除 bullets/speaker_notes 外，稳定输出 key_message、visual_suggestion、takeaway；
+          字段缺失时后端自动补齐默认值。
+    要做：修改 page_generation 的 prompt、解析与 normalize；
+          更新 outline 结构和 mock 数据；保证旧前端仍可读 bullets。
+    文件：backend/app/services/page_generation.py
+          backend/app/services/generation.py（如旧 generate 也同步）
+          frontend/src/types/task.ts
+          frontend/src/mocks/mockTask.ts
+
+  【C2】前端·增强内容展示与编辑
+    验收：结果页可展示/编辑 key_message、visual_suggestion、takeaway、speaker_notes；
+          PATCH /outline 能保存这些新增字段。
+    要做：扩展结果页表单；保存 outline 时携带新增字段；
+          Mock 与真实后端字段一致。
+    文件：frontend/src/App.vue
+          frontend/src/api/httpApi.ts
+          frontend/src/api/mockApi.ts
+          frontend/src/types/task.ts
+
+  【R3】检索 query 与来源质量优化
+    验收：每页检索 query 能体现“需要数据/案例/定义/风险”等意图；
+          来源过低质量时降权或剔除；Tavily 结果更干净。
+    要做：根据 skeleton.intent、user_notes、页面位置构造更具体 query；
+          增加来源分级规则（官网/论文/报告优先，聚合页/营销页降权）。
+    文件：backend/app/services/page_generation.py
+          backend/app/retrieval/types.py（如需加字段）
+          backend/tests/test_page_generation.py
+
+================================================================================
+  成员 3（3 项）— RAG 质量 + 导出
+================================================================================
+
+  【R1】RAG 证据清洗
+    验收：evidence_catalog 中不再出现大段导航、版权、网站地图、重复文本；
+          单条 snippet 默认控制在 200 字左右，保留可引用事实句。
+    要做：新增 evidence 清洗函数；过滤 Copyright/网站地图/导航/登录/免责声明等噪声；
+          对超长 snippet 做句子切分和截断。
+    文件：backend/app/services/page_generation.py
+          backend/app/services/orchestration.py（旧链路同步）
+          backend/tests/test_page_generation.py
+
+  【R2】RAG 证据与 bullet 匹配
+    验收：bullet.evidence_ids 不再简单按顺序贴；优先选择与 bullet 文本最相关的证据；
+          无相关证据时 evidence_ids 为空，并在 meta/page_evidence_map 标记低可信。
+    要做：实现规则/相似度匹配；至少用关键词重叠 + 分数阈值；
+          生成 page_evidence_map 时记录匹配原因或低可信标记。
+    文件：backend/app/services/page_generation.py
+          backend/app/services/orchestration.py（可选同步）
+          backend/tests/test_page_generation.py
+
+  【C5】前端·Markdown 导出
+    验收：结果页可一键导出/复制 Markdown，包含标题、每页结构、证据引用摘要；
+          不依赖后端新接口即可使用。
+    要做：新增 outline -> Markdown 转换函数；结果页加「复制 Markdown / 下载 .md」按钮；
+          处理 evidence_catalog 为空的情况。
+    文件：frontend/src/App.vue（或拆 utils）
+          frontend/src/types/task.ts
+
+================================================================================
+  成员 4（3 项）— 性能、错误重试、生成参数
+================================================================================
+
+  【P1】生成加速与缓存
+    验收：同一任务骨架未变时，重复按页生成不重复执行所有 RAG；
+          完整生成耗时较当前明显下降。
+    要做：缓存每页 retrieval_by_slide；按 slide_id + title + intent + user_notes 判断是否复用；
+          保留强制刷新选项。
+    文件：backend/app/services/page_generation.py
+          backend/app/api/routes/tasks.py
+          backend/app/task_store.py
+
+  【E1】错误分类与重试 API
+    验收：失败时前端能看到 LLM_ERROR / RETRIEVAL_ERROR / TAVILY_ERROR / TIMEOUT / INTERNAL_ERROR；
+          failed 任务可一键重试按页生成，不必重新创建任务。
+    要做：细分 complete_slide_generation 异常；error.details 给出 retryable、phase、slide_id；
+          支持 POST .../slides/generate 对 failed+有骨架任务重新排队。
+    文件：backend/app/api/routes/tasks.py
+          backend/app/services/page_generation.py
+          backend/tests/test_api_tasks.py
+
+  【C4】前端·错误提示、重试与生成参数
+    验收：失败页显示可读错误原因和「重试生成」按钮；
+          用户可选择检索深度、是否联网检索、按页并发 1/2/3 后再生成。
+    要做：前端展示 error.code/details；对接重试；
+          generateSlides 请求携带 concurrency 等参数（后端已支持 concurrency）。
+    文件：frontend/src/App.vue
+          frontend/src/api/httpApi.ts
+          frontend/src/api/mockApi.ts
+          frontend/src/types/task.ts
+
+================================================================================
+  分工一览表
+================================================================================
+
+  成员 | 模块              | 后端/前端
+  -----|-------------------|----------
+  1    | A1, A2, C1        | 后后前
+  2    | B1, C2, R3        | 后前后
+  3    | R1, R2, C5        | 后后前
+  4    | P1, E1, C4        | 后后前
+
+================================================================================
+  端到端流程（四人联调参照）
+================================================================================
+
+  生成骨架 → 确认骨架 → 按页生成时 A1/A2/C1 实时展示 partial outline
+  → B1/C2 展示更详细页面结构 → R3 优化检索 query → R1/R2 提升证据质量
+  → P1 加速重复生成 → E1/C4 支持错误可读化与重试 → C5 导出 Markdown。
+
+================================================================================
+  共同遵守
+================================================================================
+
+  · 本周新增页面字段暂定：key_message、visual_suggestion、takeaway。
+  · 新字段必须可选；旧 outline 仍能正常展示和保存。
+  · evidence_catalog 中 snippet 默认不超过 200 字，前端可再折叠显示。
+  · 增量展示时 status=generating 也允许 outline 存在，但 meta.partial=true。
+  · RAG 证据不能硬贴；低相关时 evidence_ids=[]，并记录 low_confidence。
+  · 真实 LLM / Tavily key 不写入文档和提交记录。
+
+================================================================================

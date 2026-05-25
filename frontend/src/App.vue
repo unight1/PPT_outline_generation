@@ -293,6 +293,7 @@ async function handleRegenerateSlide(slideId: string, userInstruction?: string) 
     await regenerateSlide(task.value.task_id, slideId, {
       user_instruction: userInstruction || undefined,
     })
+    task.value = await getTask(task.value.task_id)
 
     const pollStart = Date.now()
     const maxPollMs = 10 * 60 * 1000
@@ -619,6 +620,28 @@ function restart() {
         >
           {{ regeneratingSlideId === slide.slide_id ? '重生成中...' : '重新生成' }}
         </button>
+      </div>
+
+      <div
+        v-if="regeneratingSlideId === slide.slide_id && task?.progress"
+        class="progress-box"
+      >
+        <strong>{{ task.progress.message || '正在重新生成该页...' }}</strong>
+        <p class="hint">
+          当前阶段：{{ task.progress.phase }}
+          <span v-if="task.progress.current != null && task.progress.total != null">
+            ｜{{ task.progress.current }} / {{ task.progress.total }}
+          </span>
+        </p>
+        <div
+          v-if="typeof task.progress.percent === 'number'"
+          class="progress-track"
+        >
+          <div
+            class="progress-fill"
+            :style="{ width: `${task.progress.percent}%` }"
+          />
+        </div>
       </div>
 
       <label class="field">

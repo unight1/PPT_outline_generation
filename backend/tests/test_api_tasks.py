@@ -4,6 +4,7 @@ from concurrent.futures import Future
 
 from fastapi.testclient import TestClient
 
+from app.config import settings
 from app.main import app
 from app.api.routes import tasks as tasks_route
 
@@ -27,6 +28,7 @@ def _sync_enqueue_skeleton(task_id: str) -> Future[None]:
 def setup_function() -> None:
     tasks_route.TASK_STORE.clear()
     tasks_route.USE_DB_STORE = False
+    settings.use_real_llm = False
 
 
 def test_create_task_starts_in_clarifying() -> None:
@@ -167,6 +169,96 @@ def test_generate_skeleton_requires_submitted_clarification() -> None:
     task_id = create["task_id"]
 
     resp = client.post(f"/api/tasks/{task_id}/skeleton/generate", json={})
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "INVALID_STATE"
+
+
+def test_patch_skeleton_after_failed_resets_to_pending() -> None:
+    client = TestClient(app)
+    create = client.post("/api/tasks", json={"topic": "AI PPT", "retrieval_depth": "L0"}).json()
+    task_id = create["task_id"]
+    task = tasks_route.TASK_STORE[task_id]
+    task["status"] = "failed"
+    task["clarification"]["submitted"] = True
+    task["outline_skeleton"] = [{"slide_id": "s1", "title": "旧页", "intent": "", "user_notes": ""}]
+    task["error"] = {"code": "INTERNAL_ERROR", "message": "old failure", "details": {}}
+
+    resp = client.patch(
+        f"/api/tasks/{task_id}/skeleton",
+        json={"slides": [{"slide_id": "s1", "title": "重试页", "intent": "重新生成", "user_notes": ""}]},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "pending"
+    assert body["error"] is None
+    assert body["outline_skeleton"][0]["title"] == "重试页"
+    assert body["progress"]["phase"] == "skeleton_ready"
+
+
+def test_patch_outline_merges_slides_and_rebuilds_evidence_map() -> None:
+    client = TestClient(app)
+    create = client.post("/api/tasks", json={"topic": "AI PPT", "retrieval_depth": "L0"}).json()
+    task_id = create["task_id"]
+    task = tasks_route.TASK_STORE[task_id]
+    task["status"] = "done"
+    task["outline"] = {
+        "title": "旧标题",
+        "slides": [
+            {
+                "slide_id": "s1",
+                "title": "第一页",
+                "bullets": [{"bullet_id": "s1-b1", "text": "旧要点", "evidence_ids": ["ev_1"]}],
+                "speaker_notes": "",
+            },
+            {
+                "slide_id": "s2",
+                "title": "第二页",
+                "bullets": [{"bullet_id": "s2-b1", "text": "保留要点", "evidence_ids": []}],
+                "speaker_notes": "",
+            },
+        ],
+        "evidence_catalog": [
+            {"evidence_id": "ev_1", "snippet": "旧证据", "source_id": "old", "locator": "L1", "score": 0.5, "confidence": 0.5}
+        ],
+        "page_evidence_map": [],
+        "meta": {"retrieval_depth": "L0"},
+    }
+
+    resp = client.patch(
+        f"/api/tasks/{task_id}/outline",
+        json={
+            "title": "新标题",
+            "slides": [
+                {
+                    "slide_id": "s1",
+                    "title": "第一页修改",
+                    "bullets": [{"bullet_id": "s1-b1", "text": "新要点", "evidence_ids": ["ev_2"]}],
+                    "speaker_notes": "新备注",
+                }
+            ],
+            "evidence_catalog": [
+                {"evidence_id": "ev_2", "snippet": "新证据", "source_id": "new", "locator": "L2", "score": 0.9, "confidence": 0.8}
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    patched = resp.json()
+    assert patched["outline"]["title"] == "新标题"
+    assert patched["outline"]["slides"][0]["title"] == "第一页修改"
+    assert patched["outline"]["slides"][1]["title"] == "第二页"
+    assert patched["outline"]["page_evidence_map"][0]["evidence_trace"][0]["evidence_id"] == "ev_2"
+    assert patched["progress"]["phase"] == "done"
+
+
+def test_patch_outline_rejects_before_done() -> None:
+    client = TestClient(app)
+    create = client.post("/api/tasks", json={"topic": "AI PPT", "retrieval_depth": "L0"}).json()
+    task_id = create["task_id"]
+
+    resp = client.patch(f"/api/tasks/{task_id}/outline", json={"title": "新标题"})
+
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "INVALID_STATE"
 
@@ -409,6 +501,49 @@ def test_recover_inflight_generations_marks_stale_and_requeues() -> None:
         assert tasks_route.TASK_STORE["t-1"]["error"]["code"] == "INTERNAL_ERROR"
     finally:
         tasks_route.enqueue_generation = old_enqueue
+
+
+def test_recover_inflight_generations_requeues_skeleton_and_slides() -> None:
+    base = {
+        "schema_version": "v1.0.0",
+        "status": "generating",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2020-01-01T00:00:00+00:00",
+        "input": {"topic": "x", "retrieval_depth": "L0", "raw_notes": None},
+        "clarification": {"questions": [], "submitted": True},
+        "outline": None,
+        "outline_skeleton": [{"slide_id": "s1", "title": "页1", "intent": "", "user_notes": ""}],
+        "error": None,
+    }
+    tasks_route.TASK_STORE["skeleton-task"] = {
+        **base,
+        "task_id": "skeleton-task",
+        "runtime": {"workflow": "skeleton"},
+        "progress": {"phase": "skeleton_llm", "current": None, "total": None, "message": "", "percent": None},
+    }
+    tasks_route.TASK_STORE["slides-task"] = {
+        **base,
+        "task_id": "slides-task",
+        "runtime": {"workflow": "slides", "concurrency": 2},
+        "progress": {"phase": "llm_page", "current": 1, "total": 1, "message": "", "percent": 50},
+    }
+
+    skeleton_called: list[str] = []
+    slides_called: list[str] = []
+    old_enqueue_skeleton = tasks_route.enqueue_skeleton_generation
+    old_enqueue_slide = tasks_route.enqueue_slide_generation
+    tasks_route.enqueue_skeleton_generation = lambda task_id: skeleton_called.append(task_id) or _done_future()  # type: ignore[assignment]
+    tasks_route.enqueue_slide_generation = lambda task_id: slides_called.append(task_id) or _done_future()  # type: ignore[assignment]
+    try:
+        recovered = tasks_route.recover_inflight_generations(limit=10)
+        assert recovered == 2
+        assert skeleton_called == ["skeleton-task"]
+        assert slides_called == ["slides-task"]
+        assert tasks_route.TASK_STORE["skeleton-task"]["status"] == "pending"
+        assert tasks_route.TASK_STORE["slides-task"]["status"] == "pending"
+    finally:
+        tasks_route.enqueue_skeleton_generation = old_enqueue_skeleton
+        tasks_route.enqueue_slide_generation = old_enqueue_slide
 
 
 def test_retry_failed_task_accepts_only_failed() -> None:

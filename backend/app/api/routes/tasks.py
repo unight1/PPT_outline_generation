@@ -148,6 +148,44 @@ class GenerateSlidesRequest(BaseModel):
     concurrency: int | None = Field(default=None, ge=1, le=3)
 
 
+class OutlineBullet(BaseModel):
+    bullet_id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class OutlineSlide(BaseModel):
+    slide_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    bullets: list[OutlineBullet] = Field(default_factory=list)
+    speaker_notes: str | None = None
+
+
+class EvidenceItem(BaseModel):
+    evidence_id: str = Field(min_length=1)
+    snippet: str = ""
+    source_id: str = "unknown"
+    locator: str = ""
+    score: float | None = None
+    confidence: float | None = None
+
+
+class PatchOutlineRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1)
+    slides: list[OutlineSlide] | None = None
+    evidence_catalog: list[EvidenceItem] | None = None
+
+    @model_validator(mode="after")
+    def validate_has_update(self) -> "PatchOutlineRequest":
+        if self.title is None and self.slides is None and self.evidence_catalog is None:
+            raise ValueError("At least one of title, slides, evidence_catalog is required")
+        if self.slides is not None:
+            slide_ids = [slide.slide_id for slide in self.slides]
+            if len(slide_ids) != len(set(slide_ids)):
+                raise ValueError("slide_id must be unique within slides")
+        return self
+
+
 class ListTasksResponse(BaseModel):
     tasks: list[dict[str, Any]]
     total: int
@@ -363,6 +401,54 @@ def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _rebuild_page_evidence_map(outline: dict[str, Any]) -> None:
+    catalog = outline.get("evidence_catalog", [])
+    if not isinstance(catalog, list):
+        catalog = []
+    ev_lookup = {
+        str(item.get("evidence_id")): item
+        for item in catalog
+        if isinstance(item, dict) and str(item.get("evidence_id") or "").strip()
+    }
+    valid_ids = set(ev_lookup)
+    page_evidence_map: list[dict[str, Any]] = []
+    slides = outline.get("slides", [])
+    if not isinstance(slides, list):
+        outline["page_evidence_map"] = page_evidence_map
+        return
+
+    for slide in slides:
+        if not isinstance(slide, dict):
+            continue
+        ev_to_bullets: dict[str, list[str]] = {}
+        bullets = slide.get("bullets", [])
+        if isinstance(bullets, list):
+            for bullet in bullets:
+                if not isinstance(bullet, dict):
+                    continue
+                raw_ids = bullet.get("evidence_ids", [])
+                if not isinstance(raw_ids, list):
+                    raw_ids = []
+                cleaned_ids = [str(eid) for eid in raw_ids if str(eid) in valid_ids]
+                bullet["evidence_ids"] = cleaned_ids
+                bullet_id = str(bullet.get("bullet_id") or "")
+                for eid in cleaned_ids:
+                    ev_to_bullets.setdefault(eid, []).append(bullet_id)
+        evidence_trace: list[dict[str, Any]] = []
+        for eid, bullet_ids in ev_to_bullets.items():
+            entry = dict(ev_lookup[eid])
+            entry["bullet_ids"] = bullet_ids
+            evidence_trace.append(entry)
+        page_evidence_map.append(
+            {
+                "slide_id": str(slide.get("slide_id") or ""),
+                "slide_title": str(slide.get("title") or ""),
+                "evidence_trace": evidence_trace,
+            }
+        )
+    outline["page_evidence_map"] = page_evidence_map
+
+
 @router.post("", response_model=CreateTaskResponse, status_code=status.HTTP_201_CREATED)
 def create_task(payload: CreateTaskRequest) -> CreateTaskResponse:
     task_id = str(uuid4())
@@ -529,7 +615,7 @@ def patch_skeleton(task_id: UUID, payload: PatchSkeletonRequest) -> dict[str, An
             "Cannot update skeleton while generation is running.",
             {"status": task["status"]},
         )
-    if task["status"] not in (TaskStatus.pending.value, TaskStatus.clarifying.value):
+    if task["status"] not in (TaskStatus.pending.value, TaskStatus.clarifying.value, TaskStatus.failed.value):
         raise build_error(
             status.HTTP_409_CONFLICT,
             "INVALID_STATE",
@@ -541,12 +627,75 @@ def patch_skeleton(task_id: UUID, payload: PatchSkeletonRequest) -> dict[str, An
 
     slides = [slide.model_dump() for slide in payload.slides]
     task["outline_skeleton"] = slides
+    if task["status"] == TaskStatus.failed.value:
+        task["status"] = TaskStatus.pending.value
+        task["error"] = None
     update_task_progress(
         task,
         "skeleton_ready",
         "骨架已更新，请确认后生成完整大纲。",
         total=len(slides),
     )
+    task["updated_at"] = now_iso()
+    persist_task(task)
+    return task_snapshot(task)
+
+
+@router.patch("/{task_id:uuid}/outline")
+def patch_outline(task_id: UUID, payload: PatchOutlineRequest) -> dict[str, Any]:
+    task_id_str = str(task_id)
+    validate_task_id(task_id_str)
+    task = get_task_or_404(task_id_str)
+    if task["status"] == TaskStatus.generating.value:
+        raise build_error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_STATE",
+            "Cannot update outline while generation is running.",
+            {"status": task["status"]},
+        )
+    if task["status"] != TaskStatus.done.value:
+        raise build_error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_STATE",
+            "Outline can only be updated after generation is done.",
+            {"status": task["status"]},
+        )
+    outline = task.get("outline")
+    if not isinstance(outline, dict):
+        raise build_error(status.HTTP_409_CONFLICT, "INVALID_STATE", "Outline has not been generated yet.")
+
+    if payload.title is not None:
+        outline["title"] = payload.title
+
+    if payload.evidence_catalog is not None:
+        outline["evidence_catalog"] = [item.model_dump() for item in payload.evidence_catalog]
+
+    if payload.slides is not None:
+        existing_slides = outline.get("slides", [])
+        if not isinstance(existing_slides, list):
+            existing_slides = []
+        incoming = {slide.slide_id: slide.model_dump() for slide in payload.slides}
+        known_ids = {
+            str(slide.get("slide_id"))
+            for slide in existing_slides
+            if isinstance(slide, dict) and str(slide.get("slide_id") or "").strip()
+        }
+        unknown_ids = sorted(set(incoming) - known_ids)
+        if unknown_ids:
+            raise build_error(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "VALIDATION_ERROR",
+                "slides contains unknown slide_id.",
+                {"slide_ids": unknown_ids},
+            )
+        outline["slides"] = [
+            incoming.get(str(slide.get("slide_id")), slide) if isinstance(slide, dict) else slide
+            for slide in existing_slides
+        ]
+
+    _rebuild_page_evidence_map(outline)
+    task["outline"] = outline
+    update_task_progress(task, "done", "大纲修改已保存。", percent=100)
     task["updated_at"] = now_iso()
     persist_task(task)
     return task_snapshot(task)
@@ -586,7 +735,7 @@ def generate_slides(task_id: UUID, payload: GenerateSlidesRequest | None = None)
     idempotency_key = (payload.idempotency_key if payload else None) or ""
     task["status"] = TaskStatus.generating.value
     task["error"] = None
-    concurrency = payload.concurrency if payload else 2
+    concurrency = payload.concurrency if payload and payload.concurrency is not None else 2
     task["runtime"] = {
         **runtime,
         "workflow": "slides",
@@ -1007,6 +1156,10 @@ def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str
             _generate_single_page,
         )
 
+        update_task_progress(task, "regenerating_slide", "正在检索该页参考资料。", current=0, total=1, percent=20)
+        task["updated_at"] = now_iso()
+        persist_task(task)
+
         retrieval_by_slide = retrieve_for_pages(topic, retrieval_depth, [skeleton_entry], clarification)
         hits = retrieval_by_slide.get(slide_id, [])
         ev_counter = 1
@@ -1014,10 +1167,22 @@ def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str
             hit["evidence_id"] = f"ev_re_{ev_counter}"
             ev_counter += 1
 
+        update_task_progress(task, "regenerating_slide", "正在重新生成该页内容。", current=1, total=1, percent=60)
+        task["updated_at"] = now_iso()
+        persist_task(task)
+
         if user_instruction:
             new_slide = _generate_single_page(topic, skeleton_entry, hits)
         else:
             new_slide = _generate_single_page(topic, skeleton_entry, hits)
+
+        hit_ids = [str(hit.get("evidence_id") or "") for hit in hits if str(hit.get("evidence_id") or "")]
+        bullets = new_slide.get("bullets", [])
+        if isinstance(bullets, list):
+            for idx, bullet in enumerate(bullets):
+                if not isinstance(bullet, dict):
+                    continue
+                bullet["evidence_ids"] = [hit_ids[min(idx, len(hit_ids) - 1)]] if hit_ids else []
 
         # Merge new page into existing outline
         slides[target_idx] = new_slide
@@ -1062,25 +1227,10 @@ def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str
                 "confidence": hit.get("confidence"),
             })
         outline["evidence_catalog"] = new_catalog
-
-        # Rebuild page_evidence_map
-        from app.services.page_generation import merge_pages_to_outline
-
-        skeleton_for_map = [
-            {"slide_id": s.get("slide_id", ""), "title": s.get("title", "")}
-            for s in slides if isinstance(s, dict)
-        ]
-        page_results = {s.get("slide_id", ""): s for s in slides if isinstance(s, dict)}
-        retrieval_map = {}
-        for s in slides:
-            sid = s.get("slide_id", "")
-            retrieval_map[sid] = hits if sid == slide_id else []
-        rebuilt = merge_pages_to_outline(topic, skeleton_for_map, page_results, retrieval_map, retrieval_depth)
-        outline["evidence_catalog"] = rebuilt.get("evidence_catalog", new_catalog)
-        outline["page_evidence_map"] = rebuilt.get("page_evidence_map", [])
+        _rebuild_page_evidence_map(outline)
 
         task["outline"] = outline
-        task["progress"] = {"phase": "done", "current": None, "total": None, "message": "单页重生成完成", "percent": 100}
+        update_task_progress(task, "done", "单页重生成完成", percent=100)
         task["status"] = TaskStatus.done.value
         task["error"] = None
         task["updated_at"] = now_iso()
@@ -1092,6 +1242,7 @@ def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str
         if task is not None:
             task["status"] = TaskStatus.failed.value
             task["error"] = {"code": "INTERNAL_ERROR", "message": str(exc), "details": {}}
+            update_task_progress(task, "failed", "单页重生成失败，请稍后重试。")
             task["updated_at"] = now_iso()
             persist_task(task)
 
