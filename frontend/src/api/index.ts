@@ -23,5 +23,8 @@ export const generateSlides = useMock
 export const saveOutline = useMock
   ? mockApi.saveOutline
   : httpApi.saveOutline
+export const regenerateSlide = useMock
+  ? mockApi.regenerateSlide
+  : httpApi.regenerateSlide
 
 export const apiModeLabel = useMock ? 'Mock API' : 'Backend API'

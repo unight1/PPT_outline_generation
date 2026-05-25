@@ -115,3 +115,14 @@ export interface Task {
   progress: Progress | null
   error: TaskError | null
 }
+
+export interface RegenerateSlideRequest {
+  user_instruction?: string
+}
+
+export interface RegenerateSlideResponse {
+  task_id: string
+  status: TaskStatus
+  accepted: boolean
+  slide_id: string
+}

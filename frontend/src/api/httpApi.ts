@@ -3,6 +3,8 @@ import type {
   CreateTaskResponse,
   Outline,
   OutlineSkeletonSlide,
+  RegenerateSlideRequest,
+  RegenerateSlideResponse,
   Task,
 } from '../types/task'
 
@@ -135,4 +137,18 @@ export async function saveOutline(
       evidence_catalog: outline.evidence_catalog,
     }),
   })
+}
+
+export async function regenerateSlide(
+  taskId: string,
+  slideId: string,
+  request?: RegenerateSlideRequest,
+): Promise<RegenerateSlideResponse> {
+  return requestJson<RegenerateSlideResponse>(
+    `/api/tasks/${taskId}/slides/${slideId}/regenerate`,
+    {
+      method: 'POST',
+      body: JSON.stringify(request ?? {}),
+    },
+  )
 }
