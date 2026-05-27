@@ -1,6 +1,7 @@
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
+  GenerateSlidesRequest,
   Outline,
   OutlineSkeletonSlide,
   RegenerateSlideRequest,
@@ -229,23 +230,31 @@ export async function saveOutline(
   return currentTask
 }
 
-export async function generateSlides(taskId: string): Promise<Task> {
+export async function generateSlides(
+  taskId: string,
+  options?: GenerateSlidesRequest,
+): Promise<Task> {
   await sleep(600)
 
   if (!currentTask || currentTask.task_id !== taskId) {
     throw new Error('任务不存在')
   }
 
+  console.log('Mock generate slides options:', options)
+
   pollCount = 0
   currentTask = {
     ...currentTask,
     status: 'generating',
+    error: null,
     updated_at: new Date().toISOString(),
     progress: {
       phase: 'retrieving_page',
       current: 0,
       total: currentTask.outline_skeleton?.length ?? null,
-      message: '正在准备按页生成。',
+      message: options?.force_refresh
+        ? '正在强制刷新检索并生成…'
+        : '正在准备按页生成。',
       percent: 0,
     },
   }

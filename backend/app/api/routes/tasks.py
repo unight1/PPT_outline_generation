@@ -20,7 +20,7 @@ from app.task_store import store_available
 from app.services.document_processing import build_document_profile
 from app.services.generation import should_force_fail
 from app.services.orchestration import generate_outline_with_research
-from app.services.page_generation import generate_pages_from_skeleton
+from app.services.page_generation import SlideWorkflowError, generate_pages_from_skeleton
 from app.services.skeleton import generate_outline_skeleton
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -146,6 +146,9 @@ class PatchSkeletonRequest(BaseModel):
 class GenerateSlidesRequest(BaseModel):
     idempotency_key: str | None = None
     concurrency: int | None = Field(default=None, ge=1, le=3)
+    force_refresh: bool = False
+    retrieval_depth: RetrievalDepth | None = None
+    tavily_enabled: bool | None = None
 
 
 class OutlineBullet(BaseModel):
@@ -362,6 +365,63 @@ def classify_generation_exception(exc: Exception) -> tuple[str, str, dict[str, A
             {"retryable": True},
         )
     return ("INTERNAL_ERROR", "Unexpected error during generation.", {"retryable": True})
+
+
+def classify_slide_generation_exception(
+    exc: Exception,
+    *,
+    phase: str | None = None,
+    slide_id: str | None = None,
+) -> tuple[str, str, dict[str, Any]]:
+    if isinstance(exc, SlideWorkflowError):
+        details: dict[str, Any] = {
+            "retryable": exc.retryable,
+            "phase": exc.phase or phase,
+        }
+        if exc.slide_id or slide_id:
+            details["slide_id"] = exc.slide_id or slide_id
+        if exc.reason:
+            details["reason"] = exc.reason
+        return exc.code, exc.message, details
+
+    if isinstance(exc, GenerationTimeoutError):
+        return (
+            "TIMEOUT",
+            "按页生成超时。",
+            {"retryable": True, "phase": phase or "llm_page", "slide_id": slide_id, "reason": "hard-timeout"},
+        )
+
+    message = str(exc)
+    lowered = message.lower()
+    if "timeout" in lowered:
+        return (
+            "TIMEOUT",
+            "按页生成超时，请稍后重试。",
+            {"retryable": True, "phase": phase or "llm_page", "slide_id": slide_id, "reason": "upstream-timeout"},
+        )
+    if "tavily" in lowered:
+        return (
+            "TAVILY_ERROR",
+            "网络检索失败，请检查 Tavily 或关闭联网检索。",
+            {"retryable": True, "phase": phase or "retrieving_page", "slide_id": slide_id, "reason": message},
+        )
+    if any(token in lowered for token in ("chroma", "embedding", "retriev", "index")):
+        return (
+            "RETRIEVAL_ERROR",
+            "本地检索失败，请检查文档索引。",
+            {"retryable": True, "phase": phase or "retrieving_page", "slide_id": slide_id, "reason": message},
+        )
+    if any(token in lowered for token in ("openai", "llm", "json", "api_key", "model")):
+        return (
+            "LLM_ERROR",
+            "模型生成失败，请稍后重试。",
+            {"retryable": True, "phase": phase or "llm_page", "slide_id": slide_id, "reason": message},
+        )
+    return (
+        "INTERNAL_ERROR",
+        "按页生成失败。",
+        {"retryable": True, "phase": phase, "slide_id": slide_id, "reason": message},
+    )
 
 
 def build_error(status_code: int, code: str, message: str, details: dict[str, Any] | None = None) -> HTTPException:
@@ -716,7 +776,8 @@ def generate_slides(task_id: UUID, payload: GenerateSlidesRequest | None = None)
             "Task is already generating another workflow.",
             {"status": task["status"], "phase": progress.get("phase")},
         )
-    if task["status"] != TaskStatus.pending.value:
+    allowed_statuses = (TaskStatus.pending.value, TaskStatus.failed.value)
+    if task["status"] not in allowed_statuses:
         raise build_error(
             status.HTTP_409_CONFLICT,
             "INVALID_STATE",
@@ -733,15 +794,28 @@ def generate_slides(task_id: UUID, payload: GenerateSlidesRequest | None = None)
     if not isinstance(runtime, dict):
         runtime = {}
     idempotency_key = (payload.idempotency_key if payload else None) or ""
+    was_failed = task["status"] == TaskStatus.failed.value
     task["status"] = TaskStatus.generating.value
     task["error"] = None
+    if was_failed and task.get("outline"):
+        task["outline"] = None
     concurrency = payload.concurrency if payload and payload.concurrency is not None else 2
+    if payload and payload.retrieval_depth is not None:
+        generation_retrieval_depth = payload.retrieval_depth.value
+        task["input"]["retrieval_depth"] = generation_retrieval_depth
+    else:
+        generation_retrieval_depth = task["input"].get("retrieval_depth", "L1")
+    generation_tavily_enabled = payload.tavily_enabled if payload else None
+    force_refresh = bool(payload.force_refresh) if payload else False
     task["runtime"] = {
         **runtime,
         "workflow": "slides",
         "last_started_at": now_iso(),
         "last_idempotency_key": idempotency_key or None,
         "concurrency": concurrency,
+        "generation_retrieval_depth": generation_retrieval_depth,
+        "generation_tavily_enabled": generation_tavily_enabled,
+        "force_refresh_retrieval": force_refresh,
     }
     update_task_progress(task, "retrieving_page", "正在准备按页生成。", current=0, total=len(skeleton), percent=0)
     task["updated_at"] = now_iso()
@@ -895,13 +969,19 @@ def complete_slide_generation(task_id: str, concurrency: int = 2) -> None:
         logger.exception("Slide generation crashed task_id=%s", task_id)
         task = fetch_task(task_id)
         if task is not None:
+            progress = task.get("progress") if isinstance(task.get("progress"), dict) else {}
+            phase = progress.get("phase") if isinstance(progress.get("phase"), str) else None
+            error_code, error_message, error_details = classify_slide_generation_exception(
+                exc,
+                phase=phase,
+            )
             task["status"] = TaskStatus.failed.value
             task["error"] = {
-                "code": "INTERNAL_ERROR",
-                "message": "Slide generation failed.",
-                "details": {"retryable": True, "reason": str(exc)},
+                "code": error_code,
+                "message": error_message,
+                "details": error_details,
             }
-            update_task_progress(task, "failed", "按页生成失败，请稍后重试。")
+            update_task_progress(task, "failed", error_message)
             task["updated_at"] = now_iso()
             persist_task(task)
 
@@ -1160,7 +1240,7 @@ def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str
         task["updated_at"] = now_iso()
         persist_task(task)
 
-        retrieval_by_slide = retrieve_for_pages(topic, retrieval_depth, [skeleton_entry], clarification)
+        retrieval_by_slide, _cache = retrieve_for_pages(topic, retrieval_depth, [skeleton_entry], clarification)
         hits = retrieval_by_slide.get(slide_id, [])
         ev_counter = 1
         for hit in hits:
