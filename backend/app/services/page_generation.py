@@ -15,6 +15,48 @@ from app.retrieval import RetrievalDepth, RetrievalRequest, get_retriever
 
 logger = logging.getLogger(__name__)
 
+_NOISE_KEYWORDS = {
+    "copyright", "©", "all rights reserved", "sitemap", "网站地图",
+    "免责声明", "disclaimer", "terms of service", "privacy policy",
+    "cookie policy", "了解更多", "点击这里", "更多详情", "友情链接",
+}
+
+_NOISE_LINE = re.compile(r"^[\s>→/|·•\-—]+$")
+_NAV_LINE = re.compile(
+    r"((首页|关于我们|联系我们|登录|注册|搜索|返回首页|末页)\s*[>→/|]\s*)+(首页|关于我们|联系我们|登录|注册|搜索|返回首页|末页)"
+)
+_FACT_INDICATORS = re.compile(
+    r"[\d.%]+|[A-Z][a-z]{2,}|\"[^\"]{3,}\"|《[^》]+》|是|可|能|会|将|已|应|需要|例如|包括|增加|减少|提升|下降|增长|降低|提高|发展|促进|影响|表明|发现|报告|指出|提出|认为|建议|统计|根据|研究|数据|结果",
+)
+
+
+def clean_evidence_snippet(snippet: str, max_chars: int = 200) -> str:
+    """清洗证据片段：去噪声、保留事实句、截断到 max_chars。"""
+    text = " ".join((snippet or "").split())
+    if not text:
+        return ""
+
+    if _NOISE_LINE.search(text):
+        return ""
+    if _NAV_LINE.search(text):
+        return ""
+    text_lower = text.lower()
+    if any(kw in text_lower for kw in _NOISE_KEYWORDS):
+        return ""
+
+    sentences = re.split(r"[。！？\.\!\?]+", text)
+    facts = [s.strip() for s in sentences if s.strip() and _FACT_INDICATORS.search(s)]
+    if facts:
+        text = "。".join(facts[:3])
+
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    last_period = max(truncated.rfind("。"), truncated.rfind("."), truncated.rfind("！"), truncated.rfind("?"))
+    if last_period > max_chars // 2:
+        truncated = truncated[:last_period + 1]
+    return truncated
+
 
 def _build_page_query(topic: str, slide: dict, clarification_text: str) -> str:
     parts = [topic]
@@ -117,9 +159,13 @@ def _build_page_prompt(
 
     evidence_lines: list[str] = []
     for idx, ev in enumerate(evidence_hits, start=1):
-        snippet = str(ev.get("snippet") or "")[:300]
+        eid = str(ev.get("evidence_id") or "")
+        raw_snippet = str(ev.get("snippet") or "")
+        snippet = clean_evidence_snippet(raw_snippet, max_chars=200)
+        if not snippet:
+            continue
         source = str(ev.get("source_id") or "unknown")
-        evidence_lines.append(f"- 参考{idx}: {snippet}  (来源：{source})")
+        evidence_lines.append(f"- {eid}: {snippet}  (来源：{source})")
     evidence_block = "\n".join(evidence_lines) if evidence_lines else "（无参考资料）"
 
     return f"""你是PPT大纲助手。根据以下信息为指定页面生成bullets和讲者备注。
@@ -132,22 +178,23 @@ def _build_page_prompt(
 - 页面意图：{intent or "无"}
 - 用户补充要求：{user_notes or "无"}
 
-## 参考资料（仅用于理解内容，证据引用由后端统一注入）
+## 参考资料（证据 ID 如 {evidence_hits[0].get('evidence_id', 'ev_X') if evidence_hits else 'ev_X'} 等，选择相关度最高的 0-1 条填入）
 {evidence_block}
 
 ## 输出要求
 只输出一个JSON对象：
 {{
   "bullets": [
-    {{"bullet_id": "{slide_id}-b1", "text": "要点内容", "evidence_ids": []}}
+    {{"bullet_id": "{slide_id}-b1", "text": "要点内容", "evidence_ids": ["ev_1"]}}
   ],
   "speaker_notes": "讲者备注"
 }}
 
 硬性要求：
 1) bullets 至少 2 个，最多 6 个；
-2) 所有 bullets 的 evidence_ids 必须输出空数组 []，禁止自行编造或填写证据 ID；
-3) 不要输出 Markdown，不要输出解释文字，只输出 JSON。"""
+2) 每个 bullet 可引用 0-1 条证据，仅在内容确实来自某条参考资料时引用，与内容无关的证据不要引用；
+3) bullet 与证据的匹配依据是语义相关性，不是顺序；
+4) 不要输出 Markdown，不要输出解释文字，只输出 JSON。"""
 
 
 def _extract_json_object(content: str) -> dict:
@@ -210,10 +257,16 @@ def _generate_single_page(
     for jdx, bullet in enumerate(bullets_in[:6], start=1):
         if not isinstance(bullet, dict):
             continue
+        eids = bullet.get("evidence_ids", [])
+        if not isinstance(eids, list):
+            eids = []
+        # Only keep evidence_ids that actually exist in the provided hits
+        valid_ids = {str(h.get("evidence_id") or "") for h in evidence_hits if h.get("evidence_id")}
+        eids = [str(e) for e in eids if str(e) in valid_ids]
         bullets.append({
             "bullet_id": str(bullet.get("bullet_id") or f"{slide_id}-b{jdx}"),
             "text": str(bullet.get("text") or "待补充要点"),
-            "evidence_ids": [],
+            "evidence_ids": eids[:1],  # 0-1 per bullet
         })
     if len(bullets) < 2:
         bullets.append({"bullet_id": f"{slide_id}-b{len(bullets)+1}", "text": "待补充要点", "evidence_ids": []})
@@ -239,6 +292,66 @@ def _stub_page(slide: dict) -> dict:
     }
 
 
+def match_bullets_to_evidence(
+    bullets: list[dict],
+    evidence_hits: list[dict],
+    min_score: float = 0.3,
+) -> tuple[list[dict], int]:
+    """用关键词重叠 + 分数阈值匹配 bullet 与 evidence，返回 (更新后的bullets, low_confidence_count)。"""
+    if not evidence_hits:
+        return bullets, len(bullets)
+
+    low_count = 0
+
+    for bullet in bullets:
+        if not isinstance(bullet, dict):
+            continue
+        if bullet.get("evidence_ids"):
+            continue  # LLM already matched
+
+        bullet_text = str(bullet.get("text") or "")
+        if not bullet_text.strip():
+            low_count += 1
+            continue
+
+        chars = set(bullet_text)
+        has_spaces = " " in bullet_text
+        is_english = has_spaces and sum(1 for c in bullet_text if c.isascii() and c.isalpha()) > len(bullet_text) * 0.5
+        best_score = 0.0
+        best_eid = ""
+
+        _STOPWORDS = {"a", "an", "the", "in", "on", "at", "of", "to", "for", "and", "or", "is", "are", "was", "were", "be", "been", "has", "have", "it", "its", "this", "that", "with", "from", "by", "as", "can", "will", "not", "but", "we", "they", "their", "our"}
+        for ev in evidence_hits:
+            snippet = str(ev.get("snippet") or "")
+            if not snippet:
+                continue
+            if is_english:
+                b_words = set(bullet_text.lower().split()) - _STOPWORDS
+                s_words = set(snippet.lower().split()) - _STOPWORDS
+                if not b_words or not s_words:
+                    continue
+                overlap = len(b_words & s_words) / max(1, len(b_words | s_words))
+            else:
+                snippet_chars = set(snippet)
+                if not chars or not snippet_chars:
+                    continue
+                overlap = len(chars & snippet_chars) / max(1, len(chars | snippet_chars))
+            if overlap == 0:
+                continue
+            ev_score = float(ev.get("score") or 0.5)
+            combined = 0.7 * overlap + 0.3 * max(0.0, min(1.0, ev_score))
+            if combined > best_score:
+                best_score = combined
+                best_eid = str(ev.get("evidence_id") or "")
+
+        if best_eid and best_score >= min_score:
+            bullet["evidence_ids"] = [best_eid]
+        else:
+            low_count += 1
+
+    return bullets, low_count
+
+
 def merge_pages_to_outline(
     topic: str,
     skeleton: list[dict],
@@ -256,29 +369,30 @@ def merge_pages_to_outline(
         if page is None:
             page = _stub_page(slide)
         hits = retrieval_by_slide.get(slide_id, [])
-        known_ids = [str(hit.get("evidence_id") or "") for hit in hits if str(hit.get("evidence_id") or "")]
         bullets = page.get("bullets", [])
+        low_confidence = 0
         if isinstance(bullets, list):
-            for idx, bullet in enumerate(bullets):
-                if not isinstance(bullet, dict):
-                    continue
-                if known_ids:
-                    bullet["evidence_ids"] = [known_ids[min(idx, len(known_ids) - 1)]]
-                else:
-                    bullet["evidence_ids"] = []
+            bullets, low_confidence = match_bullets_to_evidence(bullets, hits)
+            page["bullets"] = bullets
         slides.append(page)
 
-        # Collect evidence for this page
+        # Collect evidence for this page (with cleaning)
+        added_count = 0
         for hit in hits:
+            raw_snippet = str(hit.get("snippet") or "")
+            cleaned = clean_evidence_snippet(raw_snippet, max_chars=200)
+            if not cleaned:
+                continue
             evidence_catalog.append({
                 "evidence_id": str(hit.get("evidence_id") or ""),
-                "snippet": str(hit.get("snippet") or ""),
+                "snippet": cleaned,
                 "source_id": str(hit.get("source_id") or "unknown"),
                 "locator": str(hit.get("locator") or ""),
                 "score": hit.get("score"),
                 "confidence": hit.get("confidence"),
             })
-        coverage_total += len(hits)
+            added_count += 1
+        coverage_total += added_count
 
     # Build page_evidence_map
     ev_lookup = {ev["evidence_id"]: ev for ev in evidence_catalog}
@@ -315,6 +429,11 @@ def merge_pages_to_outline(
             "schema_version": settings.outline_schema_version,
             "retrieval_enabled": True,
             "evidence_coverage_total": coverage_total,
+            "low_confidence_bullets": sum(
+                1 for s in slides
+                for b in (s.get("bullets", []) if isinstance(s.get("bullets"), list) else [])
+                if isinstance(b, dict) and not b.get("evidence_ids")
+            ),
         },
     }
 
