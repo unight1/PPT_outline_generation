@@ -9,6 +9,8 @@ from app.services.page_generation import (
     _build_page_prompt,
     _build_page_query,
     _clarification_text,
+    clean_evidence_snippet,
+    match_bullets_to_evidence,
     merge_pages_to_outline,
 )
 
@@ -162,8 +164,8 @@ def test_build_page_prompt_includes_evidence() -> None:
     assert "paper.pdf" in prompt
     assert "https://example.com" in prompt
     assert "s1-b1" in prompt  # bullet_id template
-    assert '"evidence_ids": []' in prompt
-    assert "禁止自行编造或填写证据 ID" in prompt
+    assert "evidence_ids" in prompt
+    assert "0-1" in prompt  # allows selective reference
 
 
 def test_build_page_prompt_no_evidence() -> None:
@@ -464,3 +466,259 @@ def test_create_task_initializes_progress() -> None:
     assert task["progress"] is not None
     assert task["progress"]["phase"] == "idle"
     assert task["outline_skeleton"] is None
+
+
+# ── R1: clean_evidence_snippet ─────────────────────────────
+
+
+def test_clean_evidence_snippet_normal_text() -> None:
+    result = clean_evidence_snippet("AI在教育领域有广泛应用。据统计，2024年全球AI教育市场规模达到60亿美元。", max_chars=200)
+    assert "AI" in result
+    assert len(result) <= 200
+
+
+def test_clean_evidence_snippet_filters_copyright() -> None:
+    result = clean_evidence_snippet("Copyright © 2024 All Rights Reserved", max_chars=200)
+    assert result == ""
+
+
+def test_clean_evidence_snippet_filters_navigation() -> None:
+    result = clean_evidence_snippet("首页 > 关于我们 > 联系我们 > 登录 > 注册", max_chars=200)
+    assert result == ""
+
+
+def test_clean_evidence_snippet_filters_disclaimer() -> None:
+    result = clean_evidence_snippet("免责声明：本网站内容仅供参考", max_chars=200)
+    assert result == ""
+
+
+def test_clean_evidence_snippet_truncates_long_text() -> None:
+    long_text = "这是第一句。" + "一些填充文本。" * 50
+    result = clean_evidence_snippet(long_text, max_chars=200)
+    assert len(result) <= 200
+
+
+def test_clean_evidence_snippet_filters_nav_with_prefix() -> None:
+    # e.g., "网站地图" pattern
+    result = clean_evidence_snippet("网站地图", max_chars=200)
+    assert result == ""
+
+
+def test_clean_evidence_snippet_empty() -> None:
+    assert clean_evidence_snippet("") == ""
+    assert clean_evidence_snippet("   ") == ""
+
+
+# ── R2: match_bullets_to_evidence ──────────────────────────
+
+
+def test_match_bullets_high_overlap() -> None:
+    bullets = [{"bullet_id": "b1", "text": "AI教育市场规模达60亿美元", "evidence_ids": []}]
+    evidence = [{"evidence_id": "ev_1", "snippet": "2024年AI教育市场规模达60亿美元", "score": 0.9, "source_id": "report.pdf", "locator": "L1"}]
+    result, low = match_bullets_to_evidence(bullets, evidence, min_score=0.3)
+    assert result[0]["evidence_ids"] == ["ev_1"]
+    assert low == 0
+
+
+def test_match_bullets_low_overlap_gets_empty() -> None:
+    bullets = [{"bullet_id": "b1", "text": "系统架构采用微服务设计", "evidence_ids": []}]
+    evidence = [{"evidence_id": "ev_1", "snippet": "AI教育市场规模达60亿美元", "score": 0.9, "source_id": "report.pdf", "locator": "L1"}]
+    result, low = match_bullets_to_evidence(bullets, evidence, min_score=0.3)
+    assert result[0]["evidence_ids"] == []
+    assert low == 1
+
+
+def test_match_bullets_respects_existing_evidence_ids() -> None:
+    bullets = [{"bullet_id": "b1", "text": "AI改变教育", "evidence_ids": ["ev_2"]}]
+    evidence = [{"evidence_id": "ev_1", "snippet": "AI教育市场规模", "score": 0.9, "source_id": "r", "locator": "L1"}]
+    result, low = match_bullets_to_evidence(bullets, evidence, min_score=0.3)
+    assert result[0]["evidence_ids"] == ["ev_2"]
+    assert low == 0
+
+
+def test_match_bullets_no_evidence() -> None:
+    bullets = [{"bullet_id": "b1", "text": "AI改变教育", "evidence_ids": []}]
+    result, low = match_bullets_to_evidence(bullets, [], min_score=0.3)
+    assert result[0]["evidence_ids"] == []
+    assert low == 1
+
+
+def test_match_bullets_partial_match() -> None:
+    bullets = [
+        {"bullet_id": "b1", "text": "AI市场规模", "evidence_ids": []},
+        {"bullet_id": "b2", "text": "无关内容", "evidence_ids": []},
+    ]
+    evidence = [{"evidence_id": "ev_1", "snippet": "AI市场规模达60亿美元", "score": 0.9, "source_id": "r", "locator": "L1"}]
+    result, low = match_bullets_to_evidence(bullets, evidence, min_score=0.3)
+    assert result[0]["evidence_ids"] == ["ev_1"]
+    assert result[1]["evidence_ids"] == []
+    assert low == 1
+
+
+# ── R2: LLM evidence_ids preserved ─────────────────────────
+
+
+def test_generate_single_page_preserves_llm_evidence_ids(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    slide = {"slide_id": "s1", "title": "测试页", "intent": "", "user_notes": ""}
+    evidence = [{"evidence_id": "ev_1", "snippet": "AI改变教育", "source_id": "p.pdf", "locator": "L1", "score": 0.9}]
+    calls = []
+
+    class _FakeResponse:
+        class _Choice:
+            message = type("msg", (), {"content": '{"bullets":[{"bullet_id":"s1-b1","text":"要点A","evidence_ids":["ev_1"]},{"bullet_id":"s1-b2","text":"要点B","evidence_ids":[]}],"speaker_notes":"备注"}'})()
+
+        choices = [_Choice()]
+
+    def _fake_create(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(1)
+        return _FakeResponse()
+
+    monkeypatch.setattr("openai.OpenAI", lambda **kw: type("client", (), {"chat": type("chat", (), {"completions": type("comp", (), {"create": _fake_create})()})()})())  # type: ignore[func-returns-value]
+    monkeypatch.setattr(page_generation, "OpenAI", lambda **kw: type("client", (), {"chat": type("chat", (), {"completions": type("comp", (), {"create": _fake_create})()})()})())  # type: ignore[func-returns-value]
+
+    from app.services.page_generation import _generate_single_page  # noqa: F811
+
+    result = _generate_single_page("AI教育", slide, evidence)
+    # ev_1 should be preserved since it's in the evidence list
+    assert result["bullets"][0]["text"] == "要点A"
+    assert result["bullets"][0]["evidence_ids"] == ["ev_1"]
+    assert result["bullets"][1]["evidence_ids"] == []
+
+
+# ── R2: merge_pages uses matching not mechanical assignment ─
+
+
+def test_merge_pages_uses_semantic_matching() -> None:
+    skeleton = [{"slide_id": "s1", "title": "页", "intent": "", "user_notes": ""}]
+    page_results = {
+        "s1": {
+            "slide_id": "s1", "title": "页",
+            "bullets": [
+                {"bullet_id": "s1-b1", "text": "AI市场规模", "evidence_ids": []},
+                {"bullet_id": "s1-b2", "text": "微服务架构优势", "evidence_ids": []},
+            ],
+            "speaker_notes": "",
+        }
+    }
+    retrieval = {
+        "s1": [
+            {"evidence_id": "ev_1", "snippet": "微服务架构提升了系统的可扩展性和部署灵活性", "source_id": "tech.md", "locator": "L3", "score": 0.85, "confidence": 0.7},
+            {"evidence_id": "ev_2", "snippet": "AI教育市场规模达60亿美元", "source_id": "report.pdf", "locator": "L10", "score": 0.9, "confidence": 0.8},
+        ],
+    }
+    outline = merge_pages_to_outline("test", skeleton, page_results, retrieval, "L1")
+    slide = outline["slides"][0]
+    # b1 about "AI市场规模" should match ev_2, b2 about "微服务架构" should match ev_1
+    b1 = slide["bullets"][0]
+    b2 = slide["bullets"][1]
+    assert b1["evidence_ids"] == ["ev_2"]
+    assert b2["evidence_ids"] == ["ev_1"]
+    assert "low_confidence_bullets" in outline["meta"]
+
+
+# ── R1 edge cases ───────────────────────────────────────────
+
+
+def test_clean_evidence_snippet_all_noise_empty_catalog() -> None:
+    """When all evidence hits are noise, evidence_catalog skips them."""
+    skeleton = [{"slide_id": "s1", "title": "页", "intent": "", "user_notes": ""}]
+    page_results = {
+        "s1": {
+            "slide_id": "s1", "title": "页",
+            "bullets": [{"bullet_id": "s1-b1", "text": "需要证据", "evidence_ids": []}],
+            "speaker_notes": "",
+        }
+    }
+    retrieval = {
+        "s1": [
+            {"evidence_id": "ev_1", "snippet": "网站地图", "source_id": "n1", "locator": "L1", "score": 0.5},
+            {"evidence_id": "ev_2", "snippet": "Copyright © 2024", "source_id": "n2", "locator": "L2", "score": 0.5},
+        ],
+    }
+    outline = merge_pages_to_outline("test", skeleton, page_results, retrieval, "L0")
+    assert outline["evidence_catalog"] == []
+    assert outline["meta"]["evidence_coverage_total"] == 0
+
+
+def test_clean_evidence_snippet_mixed_noise_and_valid() -> None:
+    """Valid snippets survive, noise is dropped."""
+    skeleton = [{"slide_id": "s1", "title": "页", "intent": "", "user_notes": ""}]
+    page_results = {
+        "s1": {
+            "slide_id": "s1", "title": "页",
+            "bullets": [{"bullet_id": "s1-b1", "text": "市场规模", "evidence_ids": []}],
+            "speaker_notes": "",
+        }
+    }
+    retrieval = {
+        "s1": [
+            {"evidence_id": "ev_1", "snippet": "网站地图", "source_id": "noise", "locator": "L1", "score": 0.9},
+            {"evidence_id": "ev_2", "snippet": "2024年AI市场规模达60亿美元", "source_id": "real", "locator": "L2", "score": 0.85},
+        ],
+    }
+    outline = merge_pages_to_outline("test", skeleton, page_results, retrieval, "L0")
+    assert len(outline["evidence_catalog"]) == 1
+    assert outline["evidence_catalog"][0]["evidence_id"] == "ev_2"
+
+
+# ── R2 English text matching ────────────────────────────────
+
+
+def test_match_bullets_english_text() -> None:
+    bullets = [
+        {"bullet_id": "b1", "text": "Neural networks improve accuracy significantly", "evidence_ids": []},
+        {"bullet_id": "b2", "text": "Cloud infrastructure reduces operational costs", "evidence_ids": []},
+    ]
+    evidence = [
+        {"evidence_id": "ev_1", "snippet": "Cloud platforms reduce infrastructure costs by 30 percent", "score": 0.9, "source_id": "r1", "locator": "L1"},
+        {"evidence_id": "ev_2", "snippet": "Deep neural networks achieve state-of-the-art accuracy in image recognition", "score": 0.85, "source_id": "r2", "locator": "L2"},
+    ]
+    result, low = match_bullets_to_evidence(bullets, evidence, min_score=0.3)
+    assert result[0]["evidence_ids"] == ["ev_2"], f"b1 should match neural nets ev_2, got {result[0]['evidence_ids']}"
+    assert result[1]["evidence_ids"] == ["ev_1"], f"b2 should match cloud ev_1, got {result[1]['evidence_ids']}"
+    assert low == 0
+
+
+def test_match_bullets_english_low_overlap() -> None:
+    bullets = [{"bullet_id": "b1", "text": "Machine learning applications in healthcare", "evidence_ids": []}]
+    evidence = [{"evidence_id": "ev_1", "snippet": "Stock market trends in Q4 2024 show growth", "score": 0.9, "source_id": "r1", "locator": "L1"}]
+    result, low = match_bullets_to_evidence(bullets, evidence, min_score=0.3)
+    # Very low character overlap → should not match
+    assert result[0]["evidence_ids"] == []
+    assert low == 1
+
+
+# ── R2 mixed Chinese-English evidence ───────────────────────
+
+
+def test_match_bullets_mixed_language() -> None:
+    bullets = [{"bullet_id": "b1", "text": "Transformer模型在NLP任务中表现优异", "evidence_ids": []}]
+    evidence = [
+        {"evidence_id": "ev_1", "snippet": "LSTM networks were dominant before Transformer architecture", "score": 0.8, "source_id": "en", "locator": "L1"},
+        {"evidence_id": "ev_2", "snippet": "Transformer模型通过自注意力机制大幅提升了NLP性能", "score": 0.9, "source_id": "zh", "locator": "L2"},
+    ]
+    result, low = match_bullets_to_evidence(bullets, evidence, min_score=0.3)
+    # Should match ev_2 (Chinese overlap with Transformer, 模型, NLP) over ev_1
+    assert result[0]["evidence_ids"] == ["ev_2"]
+    assert low == 0
+
+
+# ── R1 edge: long snippet with noise prefix ──────────────────
+
+
+def test_clean_evidence_snippet_truncates_at_sentence_boundary() -> None:
+    # Long enough to need truncation, each sentence is ~20 chars
+    snippet = ("据统计2024年AI市场规模达60亿美元且保持增长趋势。" +
+               "全行业增长迅速体现技术变革与政策支持的协同效应。" * 15)
+    result = clean_evidence_snippet(snippet, max_chars=80)
+    assert 0 < len(result) <= 80
+
+
+def test_clean_evidence_snippet_preserves_fact_sentences() -> None:
+    snippet = "首页。联系我们。据统计2024年AI市场规模达60亿美元。全行业增长迅速。"
+    result = clean_evidence_snippet(snippet, max_chars=200)
+    # Nav-like sentences should be dropped, facts kept
+    assert "据统计" in result
+    assert "全行业增长迅速" in result
+    assert "首页" not in result or "联系我们" not in result
+
