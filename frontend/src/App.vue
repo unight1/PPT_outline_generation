@@ -12,6 +12,7 @@ import {
   saveOutline,
   apiModeLabel,
 } from './api'
+import { outlineToMarkdown } from './utils/outlineToMarkdown'
 
 type ViewName = 'form' | 'status' | 'skeleton' | 'result'
 
@@ -355,6 +356,35 @@ function restart() {
   form.document_text = ''
   skeletonSlides.value = []
 }
+
+const copyMessage = ref('')
+
+function handleCopyMarkdown() {
+  const outlineVal = outlineDraft.value
+  if (!outlineVal) return
+  try {
+    const md = outlineToMarkdown(outlineVal)
+    navigator.clipboard.writeText(md).then(() => {
+      copyMessage.value = '已复制到剪贴板'
+      setTimeout(() => (copyMessage.value = ''), 2000)
+    })
+  } catch {
+    errorMessage.value = '复制 Markdown 失败'
+  }
+}
+
+function handleDownloadMarkdown() {
+  const outlineVal = outlineDraft.value
+  if (!outlineVal) return
+  const md = outlineToMarkdown(outlineVal)
+  const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${outlineVal.title || 'outline'}.md`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 </script>
 
 <template>
@@ -592,9 +622,14 @@ function restart() {
       </button>
 
       <button class="secondary" @click="restart">生成新的大纲</button>
+      <button class="secondary" @click="handleCopyMarkdown">复制 Markdown</button>
+      <button class="secondary" @click="handleDownloadMarkdown">下载 .md</button>
     </div>
   </div>
 
+  <p v-if="copyMessage" class="success-message">
+    {{ copyMessage }}
+  </p>
   <p v-if="saveMessage" class="success-message">
     {{ saveMessage }}
   </p>
@@ -826,6 +861,13 @@ button.danger {
   gap: 12px;
   align-items: center;
   margin-top: 20px;
+  flex-wrap: wrap;
+}
+
+.actions button,
+.result-header button {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .hint {
