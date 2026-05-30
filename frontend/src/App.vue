@@ -25,6 +25,49 @@ const savingOutline = ref(false)
 const saveMessage = ref('')
 const regeneratingSlideId = ref<string | null>(null)
 
+const incrementalSlides = computed(() => {
+  const currentTask = task.value
+  if (!currentTask) return []
+
+  const skeleton = currentTask.outline_skeleton ?? []
+  const generatedSlides = currentTask.outline?.slides ?? []
+  const generatedById = new Map(
+    generatedSlides.map((slide) => [slide.slide_id, slide]),
+  )
+
+  if (skeleton.length > 0) {
+    return skeleton.map((slide, index) => {
+      const generated = generatedById.get(slide.slide_id)
+
+      return {
+        slide_id: slide.slide_id,
+        title: generated?.title ?? slide.title,
+        index,
+        slide: generated ?? null,
+        status: generated ? 'done' : 'generating',
+      }
+    })
+  }
+
+  return generatedSlides.map((slide, index) => ({
+    slide_id: slide.slide_id,
+    title: slide.title,
+    index,
+    slide,
+    status: 'done',
+  }))
+})
+
+const showIncrementalOutline = computed(() => {
+  if (!task.value) return false
+  if (task.value.status !== 'generating') return false
+
+  return (
+    incrementalSlides.value.length > 0 ||
+    Boolean(task.value.outline?.meta?.partial)
+  )
+})
+
 const form = reactive<CreateTaskRequest>({
   topic: '',
   source_type: 'short_topic',
@@ -497,6 +540,47 @@ function restart() {
   </p>
 </div>
 
+<div v-if="showIncrementalOutline" class="partial-outline">
+  <h3>生成中的页面预览</h3>
+  <p class="hint">
+    已完成 {{ task?.progress?.completed ?? task?.outline?.meta?.completed_pages ?? 0 }}
+    / {{ task?.progress?.total ?? task?.outline?.meta?.total_pages ?? incrementalSlides.length }}
+    页
+    <span v-if="task?.progress?.failed">
+      ，失败 {{ task?.progress?.failed }} 页
+    </span>
+  </p>
+
+  <article
+    v-for="item in incrementalSlides"
+    :key="item.slide_id"
+    class="slide partial-slide"
+  >
+    <h4>
+      第 {{ item.index + 1 }} 页 / {{ item.slide_id }}：{{ item.title }}
+    </h4>
+
+    <template v-if="item.slide">
+      <ul>
+        <li
+          v-for="bullet in item.slide.bullets"
+          :key="bullet.bullet_id"
+        >
+          {{ bullet.text }}
+        </li>
+      </ul>
+
+      <p v-if="item.slide.speaker_notes" class="notes">
+        讲者备注：{{ item.slide.speaker_notes }}
+      </p>
+    </template>
+
+    <p v-else class="hint">
+      该页生成中，请稍候…
+    </p>
+  </article>
+</div>
+
       <div v-if="task.status === 'failed'" class="failed-box">
         <strong>任务失败</strong>
         <p>错误码：{{ task.error?.code ?? 'UNKNOWN' }}</p>
@@ -516,6 +600,48 @@ function restart() {
       <div v-if="task.progress?.percent !== null && task.progress?.percent !== undefined" class="progress-bar">
         <div class="progress-fill" :style="{ width: `${task.progress.percent}%` }" />
       </div>
+
+      <div v-if="showIncrementalOutline" class="partial-outline">
+        <h3>生成中的页面预览</h3>
+
+        <p class="hint">
+          已完成 {{ task?.progress?.completed ?? task?.outline?.meta?.completed_pages ?? 0 }}
+          / {{ task?.progress?.total ?? task?.outline?.meta?.total_pages ?? incrementalSlides.length }}
+          页
+          <span v-if="task?.progress?.failed">
+            ，失败 {{ task?.progress?.failed }} 页
+          </span>
+        </p>
+
+        <article
+          v-for="item in incrementalSlides"
+          :key="item.slide_id"
+          class="slide partial-slide"
+        >
+          <h4>
+            第 {{ item.index + 1 }} 页 / {{ item.slide_id }}：{{ item.title }}
+          </h4>
+
+          <template v-if="item.slide">
+             <ul>
+              <li
+                v-for="bullet in item.slide.bullets"
+                :key="bullet.bullet_id"
+              >
+                 {{ bullet.text }}
+              </li>
+           </ul>
+
+             <p v-if="item.slide.speaker_notes" class="notes">
+               讲者备注：{{ item.slide.speaker_notes }}
+             </p>
+           </template>
+
+           <p v-else class="hint">
+             该页生成中，请稍候…
+           </p>
+        </article>
+        </div>
 
       <div v-if="!skeletonSlides.length" class="empty-box">
         <p>提交澄清后先生成 PPT 页级骨架，确认每页主题后再按页生成完整内容。</p>
@@ -998,6 +1124,19 @@ button.small {
   border-radius: 12px;
   background: #f8fafc;
   border: 1px solid #e5e7eb;
+}
+
+.partial-outline {
+  margin-top: 20px;
+  padding: 16px;
+  border-radius: 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.partial-slide {
+  margin-top: 12px;
+  border-style: dashed;
 }
 
 </style>

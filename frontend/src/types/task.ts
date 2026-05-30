@@ -54,6 +54,10 @@ export interface Progress {
   total: number | null
   message?: string
   percent: number | null
+
+  slide_id?: string | null
+  completed?: number
+  failed?: number
 }
 
 export interface OutlineSkeletonSlide {

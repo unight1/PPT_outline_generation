@@ -59,13 +59,74 @@ export async function getTask(taskId: string): Promise<Task> {
           percent: null,
         },
       }
-    } else if (currentTask.progress?.phase !== 'skeleton_llm' && pollCount >= 3) {
-      currentTask = {
-        ...mockTaskDone,
-        task_id: taskId,
-        created_at: currentTask.created_at,
-        updated_at: new Date().toISOString(),
-        outline_skeleton: currentTask.outline_skeleton ?? mockTaskDone.outline_skeleton,
+    } else if (currentTask.progress?.phase !== 'skeleton_llm') {
+      const total =
+        currentTask.outline_skeleton?.length ?? mockTaskDone.outline?.slides.length ?? 0
+
+      const completed = Math.min(pollCount, total)
+      const partialSlides = mockTaskDone.outline?.slides.slice(0, completed) ?? []
+      const currentSlide = partialSlides[partialSlides.length - 1]
+
+      if (completed >= total) {
+        currentTask = {
+          ...mockTaskDone,
+          task_id: taskId,
+          created_at: currentTask.created_at,
+          updated_at: new Date().toISOString(),
+          outline_skeleton:
+            currentTask.outline_skeleton ?? mockTaskDone.outline_skeleton,
+          outline: mockTaskDone.outline
+            ? {
+                ...mockTaskDone.outline,
+                meta: {
+                  ...mockTaskDone.outline.meta,
+                  partial: false,
+                  completed_pages: total,
+                  failed_pages: 0,
+                  total_pages: total,
+                },
+              }
+            : null,
+          progress: {
+            phase: 'done',
+            current: total,
+            total,
+            message: '全部页面已生成完成。',
+            percent: 100,
+            slide_id: currentSlide?.slide_id ?? null,
+            completed: total,
+            failed: 0,
+          },
+        }
+      } else {
+        currentTask = {
+          ...currentTask,
+          status: 'generating',
+          updated_at: new Date().toISOString(),
+          outline: mockTaskDone.outline
+            ? {
+                ...mockTaskDone.outline,
+                slides: partialSlides,
+                meta: {
+                  ...mockTaskDone.outline.meta,
+                  partial: true,
+                  completed_pages: completed,
+                  failed_pages: 0,
+                  total_pages: total,
+                },
+              }
+            : currentTask.outline,
+          progress: {
+            phase: 'llm_page',
+            current: completed,
+            total,
+            message: `已完成 ${completed} 页，正在生成第 ${completed + 1}/${total} 页。`,
+            percent: total ? Math.round((completed / total) * 100) : null,
+            slide_id: currentSlide?.slide_id ?? null,
+            completed,
+            failed: 0,
+          },
+        }
       }
     }
   }
@@ -236,17 +297,37 @@ export async function generateSlides(taskId: string): Promise<Task> {
     throw new Error('任务不存在')
   }
 
+  const total = currentTask.outline_skeleton?.length ?? 0
+
   pollCount = 0
   currentTask = {
     ...currentTask,
     status: 'generating',
     updated_at: new Date().toISOString(),
+    outline: {
+      title: currentTask.outline?.title ?? 'Mock PPT Outline',
+      slides: [],
+      evidence_catalog: [],
+      page_evidence_map: [],
+      meta: {
+        retrieval_depth: 'L1',
+        generated_at: new Date().toISOString(),
+        schema_version: 'v1.0.0',
+        partial: true,
+        completed_pages: 0,
+        failed_pages: 0,
+        total_pages: total,
+      },
+    },
     progress: {
       phase: 'retrieving_page',
       current: 0,
-      total: currentTask.outline_skeleton?.length ?? null,
+      total,
       message: '正在准备按页生成。',
       percent: 0,
+      slide_id: null,
+      completed: 0,
+      failed: 0,
     },
   }
 

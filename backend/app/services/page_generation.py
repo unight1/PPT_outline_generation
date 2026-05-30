@@ -334,18 +334,57 @@ def generate_pages_from_skeleton(
     if not skeleton or not isinstance(skeleton, list):
         raise RuntimeError("outline_skeleton is empty or invalid")
 
-    def _update(phase: str, current: int | None, total: int | None, message: str, percent: int | None = None) -> None:
+    def _update(
+        phase: str,
+        current: int | None,
+        total: int | None,
+        message: str,
+        percent: int | None = None,
+        slide_id: str | None = None,
+        completed: int | None = None,
+        failed: int | None = None,
+    ) -> None:
         task["progress"] = {
             "phase": phase,
             "current": current,
             "total": total,
             "message": message,
             "percent": percent,
+            "slide_id": slide_id,
+            "completed": completed,
+            "failed": failed,
         }
+        task["updated_at"] = datetime.now(timezone.utc).isoformat()
         if on_progress:
             on_progress(task)
 
     total = len(skeleton)
+
+    def _refresh_partial_outline(
+        page_results: dict[str, dict],
+        completed_pages: int,
+        failed_pages: int,
+    ) -> None:
+        completed_slide_ids = set(page_results.keys())
+        partial_skeleton = [
+            slide
+            for slide in skeleton
+            if str(slide.get("slide_id") or "") in completed_slide_ids
+        ]
+
+        partial_outline = merge_pages_to_outline(
+            topic,
+            partial_skeleton,
+            page_results,
+            retrieval_by_slide,
+            retrieval_depth,
+        )
+        partial_outline["meta"]["partial"] = True
+        partial_outline["meta"]["completed_pages"] = completed_pages
+        partial_outline["meta"]["failed_pages"] = failed_pages
+        partial_outline["meta"]["total_pages"] = total
+
+        task["outline"] = partial_outline
 
     # Phase 1: retrieve evidence for all pages
     _update("retrieving_page", 0, total, "正在检索相关资料...", 0)
@@ -358,10 +397,39 @@ def generate_pages_from_skeleton(
             hit["evidence_id"] = f"ev_{ev_counter}"
             ev_counter += 1
 
+    task["outline"] = {
+        "title": topic,
+        "slides": [],
+        "evidence_catalog": [],
+        "page_evidence_map": [],
+        "meta": {
+            "retrieval_depth": retrieval_depth,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "mode": "page_targeted",
+            "model": settings.llm_model,
+            "schema_version": settings.outline_schema_version,
+            "retrieval_enabled": True,
+            "partial": True,
+            "completed_pages": 0,
+            "failed_pages": 0,
+            "total_pages": total,
+        },
+    }
+    _update(
+        "llm_page",
+        0,
+        total,
+        "正在生成页面内容...",
+        0,
+        completed=0,
+        failed=0,
+    )
+
     # Phase 2: generate each page with concurrency control
-    _update("llm_page", 0, total, "正在生成页面内容...", 0)
     page_results: dict[str, dict] = {}
-    completed = 0
+    processed_pages = 0
+    completed_pages = 0
+    failed_pages = 0
 
     with ThreadPoolExecutor(max_workers=max(1, min(concurrency, total))) as executor:
         futures = {}
@@ -374,18 +442,68 @@ def generate_pages_from_skeleton(
         for future in as_completed(futures):
             slide_id, slide = futures[future]
             try:
-                page_results[slide_id] = future.result()
-            except Exception:
+                page = future.result()
+                page["generation_status"] = "done"
+                page_results[slide_id] = page
+                completed_pages += 1
+            except Exception as exc:
                 logger.exception("Page generation failed for slide=%s", slide_id)
-                page_results[slide_id] = _stub_page(slide)
-            completed += 1
-            pct = int(completed / total * 100) if total else None
-            _update("llm_page", completed, total, f"正在生成第 {completed}/{total} 页内容...", pct)
+                page = _stub_page(slide)
+                page["generation_status"] = "failed"
+                page["error"] = {
+                    "code": "PAGE_GENERATION_FAILED",
+                    "message": str(exc),
+                }
+                page_results[slide_id] = page
+                failed_pages += 1
+
+            processed_pages += 1
+            pct = int(processed_pages / total * 100) if total else None
+
+            _refresh_partial_outline(
+                page_results,
+                completed_pages,
+                failed_pages,
+            )
+
+            _update(
+                "llm_page",
+                processed_pages,
+                total,
+                f"已完成 {completed_pages} 页，失败 {failed_pages} 页，正在生成第 {processed_pages}/{total} 页内容...",
+                pct,
+                slide_id=slide_id,
+                completed=completed_pages,
+                failed=failed_pages,
+            )
 
     # Phase 3: merge
-    _update("assembling", None, None, "正在合并各页内容...")
+    _update(
+        "assembling",
+        total,
+        total,
+        "正在合并各页内容...",
+        100,
+        completed=completed_pages,
+        failed=failed_pages,
+    )
+
     outline = merge_pages_to_outline(topic, skeleton, page_results, retrieval_by_slide, retrieval_depth)
+    outline["meta"]["partial"] = False
+    outline["meta"]["completed_pages"] = completed_pages
+    outline["meta"]["failed_pages"] = failed_pages
+    outline["meta"]["total_pages"] = total
+    task["outline"] = outline
 
     # Phase 4: saving
-    _update("saving", None, None, "正在保存...", 100)
+    _update(
+        "saving",
+        total,
+        total,
+        "正在保存完整大纲...",
+        100,
+        completed=completed_pages,
+        failed=failed_pages,
+    )
+
     return outline
