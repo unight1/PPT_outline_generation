@@ -7,6 +7,7 @@ from typing import Any
 from app.config import settings
 from app.retrieval import RetrievalDepth, RetrievalRequest, get_retriever
 from app.services.generation import generate_outline
+from app.services.page_generation import clean_evidence_snippet, match_bullets_to_evidence
 
 _RETRIEVAL_INTENT = re.compile(
     r"(检索|引用|资料来源|证据来源|需要.*来源|cite|retriev|rag\b|web\s*search)",
@@ -385,10 +386,15 @@ def _inject_evidence(
         for hit in hits:
             evidence_id = f"ev_{next_id}"
             next_id += 1
+            hit["evidence_id"] = evidence_id
+            raw_snippet = str(hit.get("snippet") or "")
+            cleaned = clean_evidence_snippet(raw_snippet, max_chars=200)
+            if not cleaned:
+                continue
             evidence_catalog.append(
                 {
                     "evidence_id": evidence_id,
-                    "snippet": str(hit.get("snippet") or ""),
+                    "snippet": cleaned,
                     "source_id": str(hit.get("source_id") or "unknown"),
                     "locator": str(hit.get("locator") or ""),
                     "score": hit.get("score"),
@@ -400,13 +406,8 @@ def _inject_evidence(
 
         bullets = slide.get("bullets", [])
         if isinstance(bullets, list):
-            for idx, bullet in enumerate(bullets):
-                if not isinstance(bullet, dict):
-                    continue
-                if bullet.get("evidence_ids"):
-                    continue
-                if added_ids:
-                    bullet["evidence_ids"] = [added_ids[min(idx, len(added_ids) - 1)]]
+            bullets, _ = match_bullets_to_evidence(bullets, hits)
+            slide["bullets"] = bullets
         if len(added_ids) < min_evidence_per_slide:
             low_confidence_slides.append(title)
 
@@ -447,6 +448,11 @@ def _inject_evidence(
         meta["retrieval_enabled"] = True
         meta["evidence_coverage_total"] = coverage_total
         meta["low_confidence_slides"] = low_confidence_slides
+        meta["low_confidence_bullets"] = sum(
+            1 for s in slides
+            for b in (s.get("bullets", []) if isinstance(s.get("bullets"), list) else [])
+            if isinstance(b, dict) and not b.get("evidence_ids")
+        )
         outline["meta"] = meta
     return outline
 
