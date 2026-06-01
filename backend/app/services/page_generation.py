@@ -58,6 +58,109 @@ def clean_evidence_snippet(snippet: str, max_chars: int = 200) -> str:
     return truncated
 
 
+class SlideWorkflowError(RuntimeError):
+    """Raised when slide-level retrieval or LLM fails; mapped to task.error by the API layer."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        slide_id: str | None = None,
+        phase: str | None = None,
+        retryable: bool = True,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.slide_id = slide_id
+        self.phase = phase
+        self.retryable = retryable
+        self.reason = reason
+
+
+def _retrieval_cache_key(slide: dict, retrieval_depth: str, tavily_enabled: bool) -> str:
+    return "|".join(
+        [
+            str(slide.get("slide_id") or ""),
+            str(slide.get("title") or ""),
+            str(slide.get("intent") or ""),
+            str(slide.get("user_notes") or ""),
+            retrieval_depth,
+            "web" if tavily_enabled else "local",
+        ]
+    )
+
+
+def _strip_evidence_ids(hits: list[dict]) -> list[dict]:
+    cleaned: list[dict] = []
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        entry = {k: v for k, v in hit.items() if k != "evidence_id"}
+        cleaned.append(entry)
+    return cleaned
+
+
+def _classify_retrieval_exception(exc: Exception, slide_id: str) -> SlideWorkflowError:
+    if isinstance(exc, SlideWorkflowError):
+        return exc
+    lowered = str(exc).lower()
+    if "timeout" in lowered:
+        return SlideWorkflowError(
+            "TIMEOUT",
+            "检索超时，请稍后重试。",
+            slide_id=slide_id,
+            phase="retrieving_page",
+            reason=str(exc),
+        )
+    if "tavily" in lowered:
+        return SlideWorkflowError(
+            "TAVILY_ERROR",
+            "网络检索失败，请检查 Tavily 配置或关闭联网检索。",
+            slide_id=slide_id,
+            phase="retrieving_page",
+            reason=str(exc),
+        )
+    if any(token in lowered for token in ("chroma", "embedding", "retriev", "index")):
+        return SlideWorkflowError(
+            "RETRIEVAL_ERROR",
+            "本地检索失败，请检查文档索引或检索深度。",
+            slide_id=slide_id,
+            phase="retrieving_page",
+            reason=str(exc),
+        )
+    return SlideWorkflowError(
+        "RETRIEVAL_ERROR",
+        "检索失败。",
+        slide_id=slide_id,
+        phase="retrieving_page",
+        reason=str(exc),
+    )
+
+
+def _classify_llm_exception(exc: Exception, slide_id: str) -> SlideWorkflowError:
+    if isinstance(exc, SlideWorkflowError):
+        return exc
+    lowered = str(exc).lower()
+    if "timeout" in lowered:
+        return SlideWorkflowError(
+            "TIMEOUT",
+            "模型调用超时，请稍后重试。",
+            slide_id=slide_id,
+            phase="llm_page",
+            reason=str(exc),
+        )
+    return SlideWorkflowError(
+        "LLM_ERROR",
+        "页面内容生成失败。",
+        slide_id=slide_id,
+        phase="llm_page",
+        reason=str(exc),
+    )
+
+
 def _build_page_query(topic: str, slide: dict, clarification_text: str) -> str:
     parts = [topic]
     title = str(slide.get("title") or "")
@@ -96,21 +199,65 @@ def retrieve_for_pages(
     retrieval_depth: str,
     skeleton: list[dict],
     clarification: dict | None,
+    *,
+    tavily_enabled: bool | None = None,
+    slide_cache: dict[str, list[dict]] | None = None,
+    force_refresh: bool = False,
+) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    """Retrieve evidence for all pages; reuse slide_cache when skeleton slice keys match."""
+    use_tavily = settings.retrieval_tavily_enabled if tavily_enabled is None else tavily_enabled
+    cache: dict[str, list[dict]] = dict(slide_cache or {})
+    by_slide: dict[str, list[dict]] = {}
+    slides_to_fetch: list[dict] = []
+
+    for slide in skeleton:
+        slide_id = str(slide.get("slide_id") or "")
+        cache_key = _retrieval_cache_key(slide, retrieval_depth, use_tavily)
+        if not force_refresh and cache_key in cache:
+            by_slide[slide_id] = [dict(hit) for hit in cache[cache_key]]
+        else:
+            slides_to_fetch.append(slide)
+
+    if slides_to_fetch:
+        fetched = _retrieve_for_pages_uncached(
+            topic,
+            retrieval_depth,
+            slides_to_fetch,
+            clarification,
+            tavily_enabled=use_tavily,
+        )
+        for slide in slides_to_fetch:
+            slide_id = str(slide.get("slide_id") or "")
+            hits = fetched.get(slide_id, [])
+            by_slide[slide_id] = hits
+            cache_key = _retrieval_cache_key(slide, retrieval_depth, use_tavily)
+            cache[cache_key] = _strip_evidence_ids(hits)
+
+    return by_slide, cache
+
+
+def _retrieve_for_pages_uncached(
+    topic: str,
+    retrieval_depth: str,
+    skeleton: list[dict],
+    clarification: dict | None,
+    *,
+    tavily_enabled: bool,
 ) -> dict[str, list[dict]]:
-    """Retrieve evidence for all pages with bounded concurrency and Tavily budget."""
+    """Retrieve evidence for pages without reading the per-task cache."""
     retriever = get_retriever(
         documents_dir=settings.retrieval_documents_dir,
         chroma_persist_dir=settings.retrieval_chroma_dir,
-        tavily_api_key=(settings.tavily_api_key or "") if settings.retrieval_tavily_enabled else "",
+        tavily_api_key=(settings.tavily_api_key or "") if tavily_enabled else "",
     )
     clarification_text = _clarification_text(clarification)
     depth = RetrievalDepth(retrieval_depth)
-    tavily_max = settings.retrieval_tavily_max_pages if settings.retrieval_tavily_enabled else 0
+    tavily_max = settings.retrieval_tavily_max_pages if tavily_enabled else 0
     tavily_used = 0
 
     by_slide: dict[str, list[dict]] = {}
 
-    async def _run():
+    async def _run() -> None:
         nonlocal tavily_used
         semaphore = asyncio.Semaphore(max(1, settings.retrieval_parallel_pages))
         tavily_lock = asyncio.Lock()
@@ -118,22 +265,24 @@ def retrieve_for_pages(
         async def _retrieve_one(slide: dict) -> tuple[str, list[dict]]:
             nonlocal tavily_used
             slide_id = str(slide.get("slide_id") or "")
-            query = _build_page_query(topic, slide, clarification_text)
-            async with tavily_lock:
-                use_web = bool(settings.tavily_api_key) and (
-                    settings.retrieval_tavily_enabled
-                    and (tavily_max == 0 or tavily_used < tavily_max)
-                )
-                if use_web and tavily_max > 0:
-                    tavily_used += 1
-            local_depth = depth if use_web else RetrievalDepth("L0")
-            result = await retriever.retrieve(RetrievalRequest(query=query, depth=local_depth))
-            selected: list[dict] = []
-            for hit in result.hits:
-                selected.append(hit.model_dump())
-                if len(selected) >= 3:
-                    break
-            return slide_id, selected
+            try:
+                query = _build_page_query(topic, slide, clarification_text)
+                async with tavily_lock:
+                    use_web = bool(settings.tavily_api_key) and (
+                        tavily_enabled and (tavily_max == 0 or tavily_used < tavily_max)
+                    )
+                    if use_web and tavily_max > 0:
+                        tavily_used += 1
+                local_depth = depth if use_web else RetrievalDepth("L0")
+                result = await retriever.retrieve(RetrievalRequest(query=query, depth=local_depth))
+                selected: list[dict] = []
+                for hit in result.hits:
+                    selected.append(hit.model_dump())
+                    if len(selected) >= 3:
+                        break
+                return slide_id, selected
+            except Exception as exc:
+                raise _classify_retrieval_exception(exc, slide_id) from exc
 
         async def _bounded(slide: dict) -> tuple[str, list[dict]]:
             async with semaphore:
@@ -226,57 +375,69 @@ def _generate_single_page(
     slide: dict,
     evidence_hits: list[dict],
 ) -> dict:
-    if not settings.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is required.")
-    client_kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
-    if settings.openai_base_url:
-        client_kwargs["base_url"] = settings.openai_base_url
-    client = OpenAI(**client_kwargs)
-
-    prompt = _build_page_prompt(topic, slide, evidence_hits)
-    payload = {
-        "model": settings.llm_model,
-        "messages": [
-            {"role": "system", "content": "你是严谨的JSON生成器。"},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.3,
-        "timeout": settings.llm_timeout_seconds,
-    }
-    try:
-        response = client.chat.completions.create(response_format={"type": "json_object"}, **payload)
-    except Exception:
-        response = client.chat.completions.create(**payload)
-
-    content = response.choices[0].message.content or "{}"
-    raw = _extract_json_object(content)
-
     slide_id = str(slide.get("slide_id") or "")
-    bullets_in = raw.get("bullets", []) if isinstance(raw.get("bullets", []), list) else []
-    bullets: list[dict] = []
-    for jdx, bullet in enumerate(bullets_in[:6], start=1):
-        if not isinstance(bullet, dict):
-            continue
-        eids = bullet.get("evidence_ids", [])
-        if not isinstance(eids, list):
-            eids = []
-        # Only keep evidence_ids that actually exist in the provided hits
-        valid_ids = {str(h.get("evidence_id") or "") for h in evidence_hits if h.get("evidence_id")}
-        eids = [str(e) for e in eids if str(e) in valid_ids]
-        bullets.append({
-            "bullet_id": str(bullet.get("bullet_id") or f"{slide_id}-b{jdx}"),
-            "text": str(bullet.get("text") or "待补充要点"),
-            "evidence_ids": eids[:1],  # 0-1 per bullet
-        })
-    if len(bullets) < 2:
-        bullets.append({"bullet_id": f"{slide_id}-b{len(bullets)+1}", "text": "待补充要点", "evidence_ids": []})
+    try:
+        if not settings.use_real_llm:
+            return _stub_page(slide)
+        if not settings.openai_api_key:
+            raise SlideWorkflowError(
+                "LLM_ERROR",
+                "未配置 OPENAI_API_KEY，无法调用模型。",
+                slide_id=slide_id,
+                phase="llm_page",
+                retryable=False,
+            )
+        client_kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
+        if settings.openai_base_url:
+            client_kwargs["base_url"] = settings.openai_base_url
+        client = OpenAI(**client_kwargs)
 
-    return {
-        "slide_id": slide_id,
-        "title": str(slide.get("title") or slide_id),
-        "bullets": bullets,
-        "speaker_notes": str(raw.get("speaker_notes") or ""),
-    }
+        prompt = _build_page_prompt(topic, slide, evidence_hits)
+        payload = {
+            "model": settings.llm_model,
+            "messages": [
+                {"role": "system", "content": "你是严谨的JSON生成器。"},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "timeout": settings.llm_timeout_seconds,
+        }
+        try:
+            response = client.chat.completions.create(response_format={"type": "json_object"}, **payload)
+        except Exception:
+            response = client.chat.completions.create(**payload)
+
+        content = response.choices[0].message.content or "{}"
+        raw = _extract_json_object(content)
+
+        bullets_in = raw.get("bullets", []) if isinstance(raw.get("bullets", []), list) else []
+        bullets: list[dict] = []
+        for jdx, bullet in enumerate(bullets_in[:6], start=1):
+            if not isinstance(bullet, dict):
+                continue
+            eids = bullet.get("evidence_ids", [])
+            if not isinstance(eids, list):
+                eids = []
+            valid_ids = {str(h.get("evidence_id") or "") for h in evidence_hits if h.get("evidence_id")}
+            eids = [str(e) for e in eids if str(e) in valid_ids]
+            bullets.append({
+                "bullet_id": str(bullet.get("bullet_id") or f"{slide_id}-b{jdx}"),
+                "text": str(bullet.get("text") or "待补充要点"),
+                "evidence_ids": eids[:1],
+            })
+        if len(bullets) < 2:
+            bullets.append({"bullet_id": f"{slide_id}-b{len(bullets)+1}", "text": "待补充要点", "evidence_ids": []})
+
+        return {
+            "slide_id": slide_id,
+            "title": str(slide.get("title") or slide_id),
+            "bullets": bullets,
+            "speaker_notes": str(raw.get("speaker_notes") or ""),
+        }
+    except SlideWorkflowError:
+        raise
+    except Exception as exc:
+        raise _classify_llm_exception(exc, slide_id) from exc
 
 
 def _stub_page(slide: dict) -> dict:
@@ -446,7 +607,19 @@ def generate_pages_from_skeleton(
 ) -> dict[str, Any]:
     input_data = task["input"]
     topic = input_data["topic"]
-    retrieval_depth = input_data.get("retrieval_depth", "L1")
+    runtime = task.get("runtime", {})
+    if not isinstance(runtime, dict):
+        runtime = {}
+    retrieval_depth = str(runtime.get("generation_retrieval_depth") or input_data.get("retrieval_depth", "L1"))
+    tavily_enabled = runtime.get("generation_tavily_enabled")
+    if tavily_enabled is not None:
+        use_tavily = bool(tavily_enabled)
+    else:
+        use_tavily = settings.retrieval_tavily_enabled
+    force_refresh = bool(runtime.get("force_refresh_retrieval"))
+    slide_cache = runtime.get("retrieval_cache")
+    if not isinstance(slide_cache, dict):
+        slide_cache = {}
     clarification = task.get("clarification")
     skeleton = task.get("outline_skeleton", [])
 
@@ -507,7 +680,19 @@ def generate_pages_from_skeleton(
 
     # Phase 1: retrieve evidence for all pages
     _update("retrieving_page", 0, total, "正在检索相关资料...", 0)
-    retrieval_by_slide = retrieve_for_pages(topic, retrieval_depth, skeleton, clarification)
+    retrieval_by_slide, slide_cache = retrieve_for_pages(
+        topic,
+        retrieval_depth,
+        skeleton,
+        clarification,
+        tavily_enabled=use_tavily,
+        slide_cache=slide_cache,
+        force_refresh=force_refresh,
+    )
+    runtime["retrieval_cache"] = slide_cache
+    task["runtime"] = runtime
+    if on_progress:
+        on_progress(task)
 
     # Assign evidence IDs
     ev_counter = 1
@@ -565,12 +750,22 @@ def generate_pages_from_skeleton(
                 page["generation_status"] = "done"
                 page_results[slide_id] = page
                 completed_pages += 1
+            except SlideWorkflowError as exc:
+                logger.exception("Page generation failed for slide=%s", slide_id)
+                page = _stub_page(slide)
+                page["generation_status"] = "failed"
+                page["error"] = {
+                    "code": exc.code,
+                    "message": exc.message,
+                }
+                page_results[slide_id] = page
+                failed_pages += 1
             except Exception as exc:
                 logger.exception("Page generation failed for slide=%s", slide_id)
                 page = _stub_page(slide)
                 page["generation_status"] = "failed"
                 page["error"] = {
-                    "code": "PAGE_GENERATION_FAILED",
+                    "code": "INTERNAL_ERROR",
                     "message": str(exc),
                 }
                 page_results[slide_id] = page

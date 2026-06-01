@@ -221,7 +221,7 @@ def test_retrieve_for_pages_uses_parallel_budgeted_tavily(monkeypatch) -> None: 
         {"slide_id": "s2", "title": "页2"},
         {"slide_id": "s3", "title": "页3"},
     ]
-    result = page_generation.retrieve_for_pages("主题", "L1", skeleton, None)
+    result, _cache = page_generation.retrieve_for_pages("主题", "L1", skeleton, None)
 
     assert set(result) == {"s1", "s2", "s3"}
     assert retriever.depths.count("L1") == 2
@@ -310,6 +310,52 @@ def test_slides_generate_requires_pending() -> None:
     assert resp.status_code == 409
 
 
+def test_slides_generate_accepts_failed_with_skeleton() -> None:
+    task_id = _make_task_in_memory(
+        status="failed",
+        outline_skeleton=[{"slide_id": "s1", "title": "页1", "intent": "", "user_notes": ""}],
+        clarification={"questions": [], "submitted": True},
+    )
+    tasks_route.TASK_STORE[task_id]["error"] = {
+        "code": "LLM_ERROR",
+        "message": "模型失败",
+        "details": {"retryable": True, "phase": "llm_page", "slide_id": "s1"},
+    }
+    old_enqueue = tasks_route.enqueue_slides_generation
+    tasks_route.enqueue_slides_generation = lambda tid, c: None  # type: ignore[assignment]
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            f"/api/tasks/{task_id}/slides/generate",
+            json={"concurrency": 1, "force_refresh": True},
+        )
+        assert resp.status_code == 202
+        stored = tasks_route.TASK_STORE[task_id]
+        assert stored["status"] == "generating"
+        assert stored["error"] is None
+        assert stored["runtime"]["force_refresh_retrieval"] is True
+    finally:
+        tasks_route.enqueue_slides_generation = old_enqueue
+
+
+def test_classify_slide_generation_exception_maps_workflow_error() -> None:
+    from app.services.page_generation import SlideWorkflowError
+
+    exc = SlideWorkflowError(
+        "TAVILY_ERROR",
+        "网络检索失败",
+        slide_id="s2",
+        phase="retrieving_page",
+        reason="quota",
+    )
+    code, message, details = tasks_route.classify_slide_generation_exception(exc)
+    assert code == "TAVILY_ERROR"
+    assert message == "网络检索失败"
+    assert details["slide_id"] == "s2"
+    assert details["phase"] == "retrieving_page"
+    assert details["retryable"] is True
+
+
 def test_slides_generate_requires_submitted_clarification() -> None:
     task_id = _make_task_in_memory(
         status="pending",
@@ -355,6 +401,27 @@ def test_slides_generate_respects_concurrency_param() -> None:
         assert captured_concurrency == [3]
     finally:
         tasks_route.enqueue_slides_generation = old_enqueue
+
+
+def test_retrieve_for_pages_reuses_slide_cache() -> None:
+    calls = {"count": 0}
+
+    def _fake_uncached(topic, retrieval_depth, skeleton, clarification, *, tavily_enabled):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        return {str(slide.get("slide_id")): [{"snippet": "x", "source_id": "s", "locator": "l"}] for slide in skeleton}
+
+    page_generation._retrieve_for_pages_uncached = _fake_uncached  # type: ignore[method-assign]
+    slide = {"slide_id": "s1", "title": "页1", "intent": "定义", "user_notes": ""}
+    first, cache = page_generation.retrieve_for_pages("主题", "L1", [slide], None)
+    second, cache2 = page_generation.retrieve_for_pages("主题", "L1", [slide], None, slide_cache=cache)
+    assert calls["count"] == 1
+    assert first["s1"][0]["snippet"] == second["s1"][0]["snippet"]
+    assert cache2
+    third, _ = page_generation.retrieve_for_pages(
+        "主题", "L1", [slide], None, slide_cache=cache, force_refresh=True
+    )
+    assert calls["count"] == 2
+    assert third["s1"]
 
 
 def test_slides_generate_defaults_concurrency_when_payload_empty() -> None:
@@ -559,6 +626,8 @@ def test_match_bullets_partial_match() -> None:
 
 
 def test_generate_single_page_preserves_llm_evidence_ids(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(page_generation.settings, "use_real_llm", True)
+    monkeypatch.setattr(page_generation.settings, "openai_api_key", "test-key")
     slide = {"slide_id": "s1", "title": "测试页", "intent": "", "user_notes": ""}
     evidence = [{"evidence_id": "ev_1", "snippet": "AI改变教育", "source_id": "p.pdf", "locator": "L1", "score": 0.9}]
     calls = []

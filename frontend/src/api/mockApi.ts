@@ -1,6 +1,7 @@
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
+  GenerateSlidesRequest,
   Outline,
   OutlineSkeletonSlide,
   RegenerateSlideRequest,
@@ -290,7 +291,10 @@ export async function saveOutline(
   return currentTask
 }
 
-export async function generateSlides(taskId: string): Promise<Task> {
+export async function generateSlides(
+  taskId: string,
+  options?: GenerateSlidesRequest,
+): Promise<Task> {
   await sleep(600)
 
   if (!currentTask || currentTask.task_id !== taskId) {
@@ -303,6 +307,7 @@ export async function generateSlides(taskId: string): Promise<Task> {
   currentTask = {
     ...currentTask,
     status: 'generating',
+    error: null,
     updated_at: new Date().toISOString(),
     outline: {
       title: currentTask.outline?.title ?? 'Mock PPT Outline',
@@ -323,7 +328,9 @@ export async function generateSlides(taskId: string): Promise<Task> {
       phase: 'retrieving_page',
       current: 0,
       total,
-      message: '正在准备按页生成。',
+      message: options?.force_refresh
+        ? '正在强制刷新检索并生成…'
+        : '正在准备按页生成。',
       percent: 0,
       slide_id: null,
       completed: 0,

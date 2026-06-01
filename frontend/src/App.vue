@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import type { CreateTaskRequest, OutlineSkeletonSlide, Task } from './types/task'
+import type {
+  CreateTaskRequest,
+  GenerateSlidesRequest,
+  OutlineSkeletonSlide,
+  RetrievalDepth,
+  Task,
+} from './types/task'
 import {
   createTask,
   generateSkeleton,
@@ -69,6 +75,23 @@ const showIncrementalOutline = computed(() => {
   )
 })
 
+const slideGenOptions = reactive<GenerateSlidesRequest>({
+  retrieval_depth: 'L1',
+  tavily_enabled: true,
+  concurrency: 2,
+  force_refresh: false,
+})
+
+const ERROR_CODE_LABELS: Record<string, string> = {
+  LLM_ERROR: '模型生成失败',
+  RETRIEVAL_ERROR: '本地检索失败',
+  TAVILY_ERROR: '联网检索失败',
+  TIMEOUT: '处理超时',
+  INTERNAL_ERROR: '服务内部错误',
+  GENERATION_TIMEOUT: '生成超时',
+  RETRIEVAL_UNAVAILABLE: '检索服务不可用',
+}
+
 const form = reactive<CreateTaskRequest>({
   topic: '',
   source_type: 'short_topic',
@@ -101,6 +124,38 @@ const progressText = computed(() => {
   return progress.message || '处理中'
 })
 
+const taskErrorLabel = computed(() => {
+  const code = task.value?.error?.code
+  if (!code) return '未知错误'
+  return ERROR_CODE_LABELS[code] ?? code
+})
+
+const taskErrorDetailLines = computed(() => {
+  const details = task.value?.error?.details
+  if (!details) return []
+  const lines: string[] = []
+  if (typeof details.phase === 'string') {
+    lines.push(`阶段：${details.phase}`)
+  }
+  if (typeof details.slide_id === 'string') {
+    lines.push(`相关页面：${details.slide_id}`)
+  }
+  if (typeof details.reason === 'string') {
+    lines.push(`原因：${details.reason}`)
+  }
+  if (details.retryable === false) {
+    lines.push('该错误暂不支持自动重试')
+  }
+  return lines
+})
+
+const canRetrySlideGeneration = computed(() => {
+  if (!task.value || task.value.status !== 'failed') return false
+  if (!skeletonSlides.value.length) return false
+  const retryable = task.value.error?.details?.retryable
+  return retryable !== false
+})
+
 function syncSkeletonFromTask() {
   skeletonSlides.value = (task.value?.outline_skeleton ?? []).map((slide) => ({
     ...slide,
@@ -111,7 +166,47 @@ function syncSkeletonFromTask() {
 
 function enterSkeletonView() {
   syncSkeletonFromTask()
+  slideGenOptions.retrieval_depth = (form.retrieval_depth ?? 'L1') as RetrievalDepth
   view.value = 'skeleton'
+}
+
+function buildSlideGeneratePayload(): GenerateSlidesRequest {
+  return {
+    concurrency: slideGenOptions.concurrency,
+    force_refresh: slideGenOptions.force_refresh,
+    retrieval_depth: slideGenOptions.retrieval_depth,
+    tavily_enabled: slideGenOptions.tavily_enabled,
+  }
+}
+
+async function runSlideGenerationFlow() {
+  if (!task.value) return
+  if (!skeletonSlides.value.length) {
+    errorMessage.value = '请先生成并确认骨架'
+    return
+  }
+
+  loading.value = true
+  errorMessage.value = ''
+
+  try {
+    task.value = await updateSkeleton(task.value.task_id, skeletonSlides.value)
+    task.value = await generateSlides(task.value.task_id, buildSlideGeneratePayload())
+    await pollTaskUntilSettled({
+      done: (latestTask) => latestTask.status === 'done',
+      onDone: (latestTask) => {
+        if (latestTask.status === 'done') {
+          outlineDraft.value = cloneOutline(latestTask.outline)
+          saveMessage.value = ''
+          view.value = 'result'
+        }
+      },
+      timeoutMessage: '按页生成轮询超时',
+    })
+  } catch (error) {
+    loading.value = false
+    errorMessage.value = error instanceof Error ? error.message : '按页生成失败'
+  }
 }
 
 function validateForm() {
@@ -285,33 +380,11 @@ async function handleSaveSkeleton() {
 }
 
 async function handleGenerateSlides() {
-  if (!task.value) return
-  if (!skeletonSlides.value.length) {
-    errorMessage.value = '请先生成并确认骨架'
-    return
-  }
+  await runSlideGenerationFlow()
+}
 
-  loading.value = true
-  errorMessage.value = ''
-
-  try {
-    task.value = await updateSkeleton(task.value.task_id, skeletonSlides.value)
-    task.value = await generateSlides(task.value.task_id)
-    await pollTaskUntilSettled({
-      done: (latestTask) => latestTask.status === 'done',
-      onDone: (latestTask) => {
-        if (latestTask.status === 'done') {
-          outlineDraft.value = cloneOutline(latestTask.outline)
-          saveMessage.value = ''
-          view.value = 'result'
-        }
-      },
-      timeoutMessage: '按页生成轮询超时',
-    })
-  } catch (error) {
-    loading.value = false
-    errorMessage.value = error instanceof Error ? error.message : '按页生成失败'
-  }
+async function handleRetrySlideGeneration() {
+  await runSlideGenerationFlow()
 }
 
 function addSkeletonSlide() {
@@ -612,9 +685,10 @@ function handleDownloadMarkdown() {
 </div>
 
       <div v-if="task.status === 'failed'" class="failed-box">
-        <strong>任务失败</strong>
+        <strong>任务失败：{{ taskErrorLabel }}</strong>
         <p>错误码：{{ task.error?.code ?? 'UNKNOWN' }}</p>
-        <p>错误信息：{{ task.error?.message ?? '后端未返回错误信息' }}</p>
+        <p>{{ task.error?.message ?? '后端未返回错误信息' }}</p>
+        <p v-for="(line, idx) in taskErrorDetailLines" :key="idx" class="hint">{{ line }}</p>
       </div>
     </section>
 
@@ -709,21 +783,62 @@ function handleDownloadMarkdown() {
           </label>
         </article>
 
+        <div class="gen-options">
+          <h3>按页生成参数</h3>
+          <label>
+            检索深度
+            <select v-model="slideGenOptions.retrieval_depth">
+              <option value="L0">L0：仅本地 / 轻量</option>
+              <option value="L1">L1：默认平衡</option>
+              <option value="L2">L2：深度检索</option>
+            </select>
+          </label>
+          <label class="checkbox-row">
+            <input v-model="slideGenOptions.tavily_enabled" type="checkbox" />
+            启用联网检索（Tavily）
+          </label>
+          <label>
+            按页并发数
+            <select v-model.number="slideGenOptions.concurrency">
+              <option :value="1">1（最稳）</option>
+              <option :value="2">2（推荐）</option>
+              <option :value="3">3（最快）</option>
+            </select>
+          </label>
+          <label class="checkbox-row">
+            <input v-model="slideGenOptions.force_refresh" type="checkbox" />
+            强制刷新检索缓存（骨架未改但想重新搜资料时勾选）
+          </label>
+        </div>
+
         <div class="actions">
           <button class="secondary" type="button" @click="addSkeletonSlide">新增页面</button>
           <button :disabled="loading" type="button" @click="handleSaveSkeleton">
             {{ loading ? '保存中...' : '保存骨架' }}
           </button>
-          <button :disabled="loading || task.status === 'generating'" type="button" @click="handleGenerateSlides">
+          <button
+            :disabled="loading || task.status === 'generating'"
+            type="button"
+            @click="handleGenerateSlides"
+          >
             {{ task.status === 'generating' ? '生成中...' : '按页生成完整大纲' }}
           </button>
         </div>
       </div>
 
       <div v-if="task.status === 'failed'" class="failed-box">
-        <strong>任务失败</strong>
+        <strong>任务失败：{{ taskErrorLabel }}</strong>
         <p>错误码：{{ task.error?.code ?? 'UNKNOWN' }}</p>
-        <p>错误信息：{{ task.error?.message ?? '后端未返回错误信息' }}</p>
+        <p>{{ task.error?.message ?? '后端未返回错误信息' }}</p>
+        <p v-for="(line, idx) in taskErrorDetailLines" :key="`sk-${idx}`" class="hint">{{ line }}</p>
+        <button
+          v-if="canRetrySlideGeneration"
+          :disabled="loading || !skeletonSlides.length"
+          type="button"
+          @click="handleRetrySlideGeneration"
+        >
+          {{ loading ? '重试中...' : '重试按页生成' }}
+        </button>
       </div>
     </section>
 
@@ -1093,6 +1208,27 @@ button.small {
 
 .evidence-card small {
   color: #5d6b82;
+}
+
+.gen-options {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.gen-options h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .failed-box {

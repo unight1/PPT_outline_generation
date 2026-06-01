@@ -1,6 +1,7 @@
 import type {
   CreateTaskRequest,
   CreateTaskResponse,
+  GenerateSlidesRequest,
   Outline,
   OutlineSkeletonSlide,
   RegenerateSlideRequest,
@@ -113,12 +114,15 @@ export async function updateSkeleton(
   })
 }
 
-export async function generateSlides(taskId: string): Promise<Task> {
+export async function generateSlides(
+  taskId: string,
+  options?: GenerateSlidesRequest,
+): Promise<Task> {
   const result = await requestJson<{ task_id: string; status: Task['status'] }>(
     `/api/tasks/${taskId}/slides/generate`,
     {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify(options ?? {}),
     },
   )
 

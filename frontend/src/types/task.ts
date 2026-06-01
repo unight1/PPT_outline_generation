@@ -130,3 +130,20 @@ export interface RegenerateSlideResponse {
   accepted: boolean
   slide_id: string
 }
+
+export interface GenerateSlidesRequest {
+  concurrency?: 1 | 2 | 3
+  force_refresh?: boolean
+  retrieval_depth?: RetrievalDepth
+  tavily_enabled?: boolean
+}
+
+export type SlideGenerationErrorCode =
+  | 'LLM_ERROR'
+  | 'RETRIEVAL_ERROR'
+  | 'TAVILY_ERROR'
+  | 'TIMEOUT'
+  | 'INTERNAL_ERROR'
+  | 'GENERATION_TIMEOUT'
+  | 'RETRIEVAL_UNAVAILABLE'
+  | string
