@@ -76,8 +76,11 @@ export interface Bullet {
 export interface Slide {
   slide_id: string
   title: string
+  key_message?: string | null        // B1: 本页核心结论一句话
   bullets: Bullet[]
   speaker_notes: string | null
+  visual_suggestion?: string | null  // B1: 建议配图/图表类型
+  takeaway?: string | null           // B1: 听众行动建议或关键启示
 }
 
 export interface Evidence {

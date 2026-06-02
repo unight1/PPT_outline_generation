@@ -21,6 +21,35 @@ _NOISE_KEYWORDS = {
     "cookie policy", "了解更多", "点击这里", "更多详情", "友情链接",
 }
 
+# R3: 低质量来源的 URL 特征（聚合页、营销页、社交媒体聚合等）
+_LOW_QUALITY_SOURCE_PATTERNS = re.compile(
+    r"(zhidao\.baidu|wenku\.baidu|360doc|mbalib|docin|scribd|slideshare"
+    r"|marketing|promo|ads\.|advertis|coupon|shop\.|mall\."
+    r"|weibo\.com|tieba\.baidu|zhihu\.com/p/[0-9]"   # 知乎个人博客，非官方
+    r"|pinterest|instagram|facebook|twitter\.com"
+    r"|aggregat|digest|roundup|listicle)",
+    re.IGNORECASE,
+)
+
+_HIGH_QUALITY_SOURCE_PATTERNS = re.compile(
+    r"(\.gov|\.edu|arxiv\.org|doi\.org|pubmed|nature\.com|science\.org"
+    r"|acm\.org|ieee\.org|springer|wiley|elsevier"
+    r"|mckinsey|gartner|idc\.com|statista|forrester"
+    r"|reuters|bloomberg|ft\.com|wsj\.com|economist"
+    r"|github\.com|docs\.|developer\.|api\.)",
+    re.IGNORECASE,
+)
+
+
+def _is_low_quality_source(source_id: str) -> bool:
+    """R3: 判断来源是否为低质量（聚合页/营销页/社交聚合），返回 True 则降权。"""
+    if not source_id:
+        return False
+    # 高质量来源优先放行
+    if _HIGH_QUALITY_SOURCE_PATTERNS.search(source_id):
+        return False
+    return bool(_LOW_QUALITY_SOURCE_PATTERNS.search(source_id))
+
 _NOISE_LINE = re.compile(r"^[\s>→/|·•\-—]+$")
 _NAV_LINE = re.compile(
     r"((首页|关于我们|联系我们|登录|注册|搜索|返回首页|末页)\s*[>→/|]\s*)+(首页|关于我们|联系我们|登录|注册|搜索|返回首页|末页)"
@@ -174,6 +203,20 @@ def _build_page_query(topic: str, slide: dict, clarification_text: str) -> str:
         parts.append(f"用户备注：{notes}")
     if clarification_text:
         parts.append(f"补充约束：{clarification_text}")
+
+    # R3: 根据 intent 关键词推断检索需要，追加意图修饰词让 query 更精准
+    intent_lower = (intent + " " + title).lower()
+    if any(kw in intent_lower for kw in ("数据", "规模", "市场", "统计", "趋势", "增长", "比例", "占比")):
+        parts.append("检索需求：需要数据、市场规模、统计数字")
+    elif any(kw in intent_lower for kw in ("案例", "实践", "应用", "示例", "example", "case")):
+        parts.append("检索需求：需要真实案例或行业实践")
+    elif any(kw in intent_lower for kw in ("定义", "概念", "什么是", "原理", "机制", "definition")):
+        parts.append("检索需求：需要定义、概念解释或原理说明")
+    elif any(kw in intent_lower for kw in ("风险", "挑战", "问题", "限制", "缺点", "危险", "risk")):
+        parts.append("检索需求：需要风险分析、挑战或负面案例")
+    elif any(kw in intent_lower for kw in ("方案", "架构", "设计", "流程", "路径", "方法", "solution")):
+        parts.append("检索需求：需要方案设计、架构说明或实施路径")
+
     return "\n".join(parts)
 
 
@@ -275,12 +318,25 @@ def _retrieve_for_pages_uncached(
                         tavily_used += 1
                 local_depth = depth if use_web else RetrievalDepth("L0")
                 result = await retriever.retrieve(RetrievalRequest(query=query, depth=local_depth))
+                # R3: 来源质量分级过滤——优先高质量来源，降权聚合/营销页
                 selected: list[dict] = []
+                deprioritized: list[dict] = []
                 for hit in result.hits:
-                    selected.append(hit.model_dump())
+                    hit_dict = hit.model_dump()
+                    source = str(hit_dict.get("source_id") or "").lower()
+                    if _is_low_quality_source(source):
+                        deprioritized.append(hit_dict)
+                    else:
+                        selected.append(hit_dict)
                     if len(selected) >= 3:
                         break
-                return slide_id, selected
+                # 若高质量来源不足 2 条，用降权来源补充
+                if len(selected) < 2:
+                    for hit_dict in deprioritized:
+                        selected.append(hit_dict)
+                        if len(selected) >= 3:
+                            break
+                return slide_id, selected[:3]
             except Exception as exc:
                 raise _classify_retrieval_exception(exc, slide_id) from exc
 
@@ -317,7 +373,7 @@ def _build_page_prompt(
         evidence_lines.append(f"- {eid}: {snippet}  (来源：{source})")
     evidence_block = "\n".join(evidence_lines) if evidence_lines else "（无参考资料）"
 
-    return f"""你是PPT大纲助手。根据以下信息为指定页面生成bullets和讲者备注。
+    return f"""你是PPT大纲助手。根据以下信息为指定页面生成完整的页面内容。
 
 ## 演示主题
 {topic}
@@ -333,17 +389,21 @@ def _build_page_prompt(
 ## 输出要求
 只输出一个JSON对象：
 {{
+  "key_message": "本页最核心的一句话结论（15字以内，听众走出会场记住的那句话）",
   "bullets": [
     {{"bullet_id": "{slide_id}-b1", "text": "要点内容", "evidence_ids": ["ev_1"]}}
   ],
-  "speaker_notes": "讲者备注"
+  "speaker_notes": "讲者备注，2-4句可讲述话术，含过渡到下页的衔接",
+  "visual_suggestion": "建议配图或图表类型（如：柱状图对比、流程图、示意图），若无必要可填null",
+  "takeaway": "听众行动建议或关键启示，一句话（若本页是纯背景铺垫可填null）"
 }}
 
 硬性要求：
 1) bullets 至少 2 个，最多 6 个；
 2) 每个 bullet 可引用 0-1 条证据，仅在内容确实来自某条参考资料时引用，与内容无关的证据不要引用；
 3) bullet 与证据的匹配依据是语义相关性，不是顺序；
-4) 不要输出 Markdown，不要输出解释文字，只输出 JSON。"""
+4) key_message 必须输出字符串，不得为 null；
+5) 不要输出 Markdown，不要输出解释文字，只输出 JSON。"""
 
 
 def _extract_json_object(content: str) -> dict:
@@ -428,11 +488,28 @@ def _generate_single_page(
         if len(bullets) < 2:
             bullets.append({"bullet_id": f"{slide_id}-b{len(bullets)+1}", "text": "待补充要点", "evidence_ids": []})
 
+        # B1: 解析并规范化新增字段，缺失时补默认值
+        key_message_raw = raw.get("key_message")
+        key_message = str(key_message_raw).strip() if key_message_raw and str(key_message_raw).strip() else str(slide.get("title") or slide_id)
+
+        visual_suggestion_raw = raw.get("visual_suggestion")
+        visual_suggestion: str | None = None
+        if visual_suggestion_raw and str(visual_suggestion_raw).strip().lower() not in ("null", "none", ""):
+            visual_suggestion = str(visual_suggestion_raw).strip()
+
+        takeaway_raw = raw.get("takeaway")
+        takeaway: str | None = None
+        if takeaway_raw and str(takeaway_raw).strip().lower() not in ("null", "none", ""):
+            takeaway = str(takeaway_raw).strip()
+
         return {
             "slide_id": slide_id,
             "title": str(slide.get("title") or slide_id),
+            "key_message": key_message,
             "bullets": bullets,
             "speaker_notes": str(raw.get("speaker_notes") or ""),
+            "visual_suggestion": visual_suggestion,
+            "takeaway": takeaway,
         }
     except SlideWorkflowError:
         raise
@@ -445,11 +522,14 @@ def _stub_page(slide: dict) -> dict:
     return {
         "slide_id": slide_id,
         "title": str(slide.get("title") or slide_id),
+        "key_message": str(slide.get("title") or slide_id),  # B1: 默认用标题作占位
         "bullets": [
             {"bullet_id": f"{slide_id}-b1", "text": "待补充要点", "evidence_ids": []},
             {"bullet_id": f"{slide_id}-b2", "text": "待补充要点", "evidence_ids": []},
         ],
         "speaker_notes": "",
+        "visual_suggestion": None,  # B1: 可选字段，默认空
+        "takeaway": None,           # B1: 可选字段，默认空
     }
 
 

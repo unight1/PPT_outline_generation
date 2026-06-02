@@ -82,6 +82,7 @@ export const mockTaskDone: Task = {
       {
         slide_id: 's1',
         title: '项目背景',
+        key_message: '传统 PPT 制作耗时且缺乏资料依据，AI 可大幅提升效率',
         bullets: [
           {
             bullet_id: 's1-b1',
@@ -95,10 +96,13 @@ export const mockTaskDone: Task = {
           },
         ],
         speaker_notes: '这一页主要说明为什么要做这个系统。',
+        visual_suggestion: '时间对比图：传统流程 vs AI 辅助流程耗时对比',
+        takeaway: null,
       },
       {
         slide_id: 's2',
         title: '系统目标',
+        key_message: '系统不只生成文字，还要让每个要点有资料来源可追溯',
         bullets: [
           {
             bullet_id: 's2-b1',
@@ -112,10 +116,13 @@ export const mockTaskDone: Task = {
           },
         ],
         speaker_notes: '强调系统不仅生成文字，还要尽量可追溯。',
+        visual_suggestion: null,
+        takeaway: '评估自己的演示场景是否适合引入 AI 辅助工具',
       },
       {
         slide_id: 's3',
         title: '核心流程',
+        key_message: '前后端与 RAG 协同，检索驱动内容生成',
         bullets: [
           {
             bullet_id: 's3-b1',
@@ -129,6 +136,8 @@ export const mockTaskDone: Task = {
           },
         ],
         speaker_notes: '这里可以配一张流程图，后续版本再补。',
+        visual_suggestion: '系统架构流程图：前端 → 后端 → RAG → LLM → 输出',
+        takeaway: null,
       },
     ],
     evidence_catalog: [

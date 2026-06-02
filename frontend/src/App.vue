@@ -224,7 +224,7 @@ function validateForm() {
   }
 
   if (form.source_type === 'long_document' && !(form.document_text ?? '').trim()) {
-    errorMessage.value = '选择“长文档”时，需填写文档正文'
+    errorMessage.value = '选择"长文档"时，需填写文档正文'
     return false
   }
 
@@ -617,72 +617,68 @@ function handleDownloadMarkdown() {
       </div>
 
       <div v-if="task.status === 'generating'" class="progress-box">
-  <strong>
-    {{ task.progress?.message || '处理中，请稍候…' }}
-  </strong>
-
-  <p class="hint">
-    当前阶段：{{ task.progress?.phase || 'processing' }}
-    <span v-if="task.progress?.current != null && task.progress?.total != null">
-      ｜第 {{ task.progress.current }} / {{ task.progress.total }} 页
-    </span>
-  </p>
-
-  <div
-    v-if="typeof task.progress?.percent === 'number'"
-    class="progress-track"
-  >
-    <div
-      class="progress-fill"
-      :style="{ width: `${task.progress.percent}%` }"
-    />
-  </div>
-
-  <p v-if="typeof task.progress?.percent === 'number'" class="hint">
-    进度：{{ task.progress.percent }}%
-  </p>
-</div>
-
-<div v-if="showIncrementalOutline" class="partial-outline">
-  <h3>生成中的页面预览</h3>
-  <p class="hint">
-    已完成 {{ task?.progress?.completed ?? task?.outline?.meta?.completed_pages ?? 0 }}
-    / {{ task?.progress?.total ?? task?.outline?.meta?.total_pages ?? incrementalSlides.length }}
-    页
-    <span v-if="task?.progress?.failed">
-      ，失败 {{ task?.progress?.failed }} 页
-    </span>
-  </p>
-
-  <article
-    v-for="item in incrementalSlides"
-    :key="item.slide_id"
-    class="slide partial-slide"
-  >
-    <h4>
-      第 {{ item.index + 1 }} 页 / {{ item.slide_id }}：{{ item.title }}
-    </h4>
-
-    <template v-if="item.slide">
-      <ul>
-        <li
-          v-for="bullet in item.slide.bullets"
-          :key="bullet.bullet_id"
+        <strong>
+          {{ task.progress?.message || '处理中，请稍候…' }}
+        </strong>
+        <p class="hint">
+          当前阶段：{{ task.progress?.phase || 'processing' }}
+          <span v-if="task.progress?.current != null && task.progress?.total != null">
+            ｜第 {{ task.progress.current }} / {{ task.progress.total }} 页
+          </span>
+        </p>
+        <div
+          v-if="typeof task.progress?.percent === 'number'"
+          class="progress-track"
         >
-          {{ bullet.text }}
-        </li>
-      </ul>
+          <div
+            class="progress-fill"
+            :style="{ width: `${task.progress.percent}%` }"
+          />
+        </div>
+        <p v-if="typeof task.progress?.percent === 'number'" class="hint">
+          进度：{{ task.progress.percent }}%
+        </p>
+      </div>
 
-      <p v-if="item.slide.speaker_notes" class="notes">
-        讲者备注：{{ item.slide.speaker_notes }}
-      </p>
-    </template>
+      <div v-if="showIncrementalOutline" class="partial-outline">
+        <h3>生成中的页面预览</h3>
+        <p class="hint">
+          已完成 {{ task?.progress?.completed ?? task?.outline?.meta?.completed_pages ?? 0 }}
+          / {{ task?.progress?.total ?? task?.outline?.meta?.total_pages ?? incrementalSlides.length }}
+          页
+          <span v-if="task?.progress?.failed">
+            ，失败 {{ task?.progress?.failed }} 页
+          </span>
+        </p>
 
-    <p v-else class="hint">
-      该页生成中，请稍候…
-    </p>
-  </article>
-</div>
+        <article
+          v-for="item in incrementalSlides"
+          :key="item.slide_id"
+          class="slide partial-slide"
+        >
+          <h4>
+            第 {{ item.index + 1 }} 页 / {{ item.slide_id }}：{{ item.title }}
+          </h4>
+
+          <template v-if="item.slide">
+            <ul>
+              <li
+                v-for="bullet in item.slide.bullets"
+                :key="bullet.bullet_id"
+              >
+                {{ bullet.text }}
+              </li>
+            </ul>
+            <p v-if="item.slide.speaker_notes" class="notes">
+              讲者备注：{{ item.slide.speaker_notes }}
+            </p>
+          </template>
+
+          <p v-else class="hint">
+            该页生成中，请稍候…
+          </p>
+        </article>
+      </div>
 
       <div v-if="task.status === 'failed'" class="failed-box">
         <strong>任务失败：{{ taskErrorLabel }}</strong>
@@ -707,7 +703,6 @@ function handleDownloadMarkdown() {
 
       <div v-if="showIncrementalOutline" class="partial-outline">
         <h3>生成中的页面预览</h3>
-
         <p class="hint">
           已完成 {{ task?.progress?.completed ?? task?.outline?.meta?.completed_pages ?? 0 }}
           / {{ task?.progress?.total ?? task?.outline?.meta?.total_pages ?? incrementalSlides.length }}
@@ -727,25 +722,24 @@ function handleDownloadMarkdown() {
           </h4>
 
           <template v-if="item.slide">
-             <ul>
+            <ul>
               <li
                 v-for="bullet in item.slide.bullets"
                 :key="bullet.bullet_id"
               >
-                 {{ bullet.text }}
+                {{ bullet.text }}
               </li>
-           </ul>
+            </ul>
+            <p v-if="item.slide.speaker_notes" class="notes">
+              讲者备注：{{ item.slide.speaker_notes }}
+            </p>
+          </template>
 
-             <p v-if="item.slide.speaker_notes" class="notes">
-               讲者备注：{{ item.slide.speaker_notes }}
-             </p>
-           </template>
-
-           <p v-else class="hint">
-             该页生成中，请稍候…
-           </p>
+          <p v-else class="hint">
+            该页生成中，请稍候…
+          </p>
         </article>
-        </div>
+      </div>
 
       <div v-if="!skeletonSlides.length" class="empty-box">
         <p>提交澄清后先生成 PPT 页级骨架，确认每页主题后再按页生成完整内容。</p>
@@ -842,6 +836,9 @@ function handleDownloadMarkdown() {
       </div>
     </section>
 
+    <!-- ═══════════════════════════════════════════════════════
+         C2: 结果页 — 展示并编辑完整大纲（含 B1 新增字段）
+    ════════════════════════════════════════════════════════════ -->
     <section v-if="view === 'result' && outlineDraft" class="card">
       <div class="result-header">
         <div>
@@ -853,120 +850,149 @@ function handleDownloadMarkdown() {
           </p>
         </div>
 
-    <div class="actions">
-      <button
-        class="primary"
-        :disabled="savingOutline"
-        @click="handleSaveOutline"
-      >
-        {{ savingOutline ? '保存中…' : '保存修改' }}
-      </button>
-
-      <button class="secondary" @click="restart">生成新的大纲</button>
-      <button class="secondary" @click="handleCopyMarkdown">复制 Markdown</button>
-      <button class="secondary" @click="handleDownloadMarkdown">下载 .md</button>
-    </div>
-  </div>
-
-  <p v-if="copyMessage" class="success-message">
-    {{ copyMessage }}
-  </p>
-  <p v-if="saveMessage" class="success-message">
-    {{ saveMessage }}
-  </p>
-
-  <label class="field">
-    整稿标题
-    <input v-model="outlineDraft.title" />
-  </label>
-
-  <div class="outline">
-    <article
-      v-for="(slide, index) in outlineDraft.slides"
-      :key="slide.slide_id"
-      class="slide"
-    >
-      <div class="slide-header">
-        <h3>第 {{ index + 1 }} 页 / {{ slide.slide_id }}</h3>
-        <button
-          class="secondary small"
-          :disabled="regeneratingSlideId !== null"
-          type="button"
-          @click="handleRegenerateSlide(slide.slide_id)"
-        >
-          {{ regeneratingSlideId === slide.slide_id ? '重生成中...' : '重新生成' }}
-        </button>
-      </div>
-
-      <div
-        v-if="regeneratingSlideId === slide.slide_id && task?.progress"
-        class="progress-box"
-      >
-        <strong>{{ task.progress.message || '正在重新生成该页...' }}</strong>
-        <p class="hint">
-          当前阶段：{{ task.progress.phase }}
-          <span v-if="task.progress.current != null && task.progress.total != null">
-            ｜{{ task.progress.current }} / {{ task.progress.total }}
-          </span>
-        </p>
-        <div
-          v-if="typeof task.progress.percent === 'number'"
-          class="progress-track"
-        >
-          <div
-            class="progress-fill"
-            :style="{ width: `${task.progress.percent}%` }"
-          />
+        <div class="actions">
+          <button
+            class="primary"
+            :disabled="savingOutline"
+            @click="handleSaveOutline"
+          >
+            {{ savingOutline ? '保存中…' : '保存修改' }}
+          </button>
+          <button class="secondary" @click="restart">生成新的大纲</button>
+          <button class="secondary" @click="handleCopyMarkdown">复制 Markdown</button>
+          <button class="secondary" @click="handleDownloadMarkdown">下载 .md</button>
         </div>
       </div>
 
+      <p v-if="copyMessage" class="success-message">{{ copyMessage }}</p>
+      <p v-if="saveMessage" class="success-message">{{ saveMessage }}</p>
+
       <label class="field">
-        页面标题
-        <input v-model="slide.title" />
+        整稿标题
+        <input v-model="outlineDraft.title" />
       </label>
 
-      <div class="bullets">
-        <label
-          v-for="bullet in slide.bullets"
-          :key="bullet.bullet_id"
-          class="field"
+      <div class="outline">
+        <article
+          v-for="(slide, index) in outlineDraft.slides"
+          :key="slide.slide_id"
+          class="slide"
         >
-          要点 {{ bullet.bullet_id }}
-          <textarea v-model="bullet.text" rows="2" />
+          <!-- 页头：序号 + 重生成按钮 -->
+          <div class="slide-header">
+            <h3>第 {{ index + 1 }} 页 / {{ slide.slide_id }}</h3>
+            <button
+              class="secondary small"
+              :disabled="regeneratingSlideId !== null"
+              type="button"
+              @click="handleRegenerateSlide(slide.slide_id)"
+            >
+              {{ regeneratingSlideId === slide.slide_id ? '重生成中...' : '重新生成' }}
+            </button>
+          </div>
 
-          <small
-            v-if="bullet.evidence_ids.length"
-            class="evidence-tag"
+          <!-- 重生成进度条 -->
+          <div
+            v-if="regeneratingSlideId === slide.slide_id && task?.progress"
+            class="progress-box"
           >
-            证据：{{ bullet.evidence_ids.join(', ') }}
-          </small>
-        </label>
+            <strong>{{ task.progress.message || '正在重新生成该页...' }}</strong>
+            <p class="hint">
+              当前阶段：{{ task.progress.phase }}
+              <span v-if="task.progress.current != null && task.progress.total != null">
+                ｜{{ task.progress.current }} / {{ task.progress.total }}
+              </span>
+            </p>
+            <div
+              v-if="typeof task.progress.percent === 'number'"
+              class="progress-track"
+            >
+              <div
+                class="progress-fill"
+                :style="{ width: `${task.progress.percent}%` }"
+              />
+            </div>
+          </div>
+
+          <!-- 页面标题 -->
+          <label class="field">
+            页面标题
+            <input v-model="slide.title" />
+          </label>
+
+          <!-- C2/B1: 核心结论（key_message） -->
+          <label class="field">
+            核心结论
+            <span class="field-hint">听众走出会场能记住的一句话</span>
+            <input
+              v-model="slide.key_message"
+              placeholder="例如：AI 辅助工具可将大纲起草时间缩短 60%"
+            />
+          </label>
+
+          <!-- 要点列表 -->
+          <div class="bullets">
+            <label
+              v-for="bullet in slide.bullets"
+              :key="bullet.bullet_id"
+              class="field"
+            >
+              要点 {{ bullet.bullet_id }}
+              <textarea v-model="bullet.text" rows="2" />
+              <small
+                v-if="bullet.evidence_ids.length"
+                class="evidence-tag"
+              >
+                证据：{{ bullet.evidence_ids.join(', ') }}
+              </small>
+            </label>
+          </div>
+
+          <!-- 讲者备注 -->
+          <label class="field">
+            讲者备注
+            <textarea v-model="slide.speaker_notes" rows="3" />
+          </label>
+
+          <!-- C2/B1: 配图建议（visual_suggestion） -->
+          <label class="field">
+            配图 / 图表建议
+            <span class="field-hint">可选，留空表示无特殊配图需求</span>
+            <input
+              v-model="slide.visual_suggestion"
+              placeholder="例如：柱状图对比传统与 AI 辅助耗时"
+            />
+          </label>
+
+          <!-- C2/B1: 听众行动建议（takeaway） -->
+          <label class="field">
+            听众行动建议
+            <span class="field-hint">可选，背景页可留空</span>
+            <input
+              v-model="slide.takeaway"
+              placeholder="例如：评估自己的场景是否适合引入 AI 工具"
+            />
+          </label>
+        </article>
       </div>
 
-      <label class="field">
-        讲者备注
-        <textarea v-model="slide.speaker_notes" rows="3" />
-      </label>
-    </article>
-  </div>
-
-  <section class="evidence">
-    <h3>证据目录</h3>
-
-    <article
-      v-for="evidence in outlineDraft.evidence_catalog"
-      :key="evidence.evidence_id"
-      class="evidence-card"
-    >
-      <strong>{{ evidence.evidence_id }}</strong>
-      <p>{{ evidence.snippet }}</p>
-      <small>
-        来源：{{ evidence.source_id }} · 位置：{{ evidence.locator }} ·
-        score：{{ evidence.score ?? '无' }} · confidence：{{ evidence.confidence ?? '无' }}
-      </small>
-    </article>
-  </section>
-</section>
+      <!-- 证据目录 -->
+      <section class="evidence">
+        <h3>证据目录</h3>
+        <article
+          v-for="evidence in outlineDraft.evidence_catalog"
+          :key="evidence.evidence_id"
+          class="evidence-card"
+        >
+          <strong>{{ evidence.evidence_id }}</strong>
+          <p>{{ evidence.snippet }}</p>
+          <small>
+            来源：{{ evidence.source_id }} · 位置：{{ evidence.locator }} ·
+            score：{{ evidence.score ?? '无' }} · confidence：{{ evidence.confidence ?? '无' }}
+          </small>
+        </article>
+      </section>
+    </section>
   </main>
 </template>
 
@@ -1112,6 +1138,15 @@ button.danger {
 }
 
 .hint {
+  color: #5d6b82;
+}
+
+/* C2: 字段说明副标题 */
+.field-hint {
+  display: inline;
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
   color: #5d6b82;
 }
 
@@ -1316,5 +1351,4 @@ button.small {
   margin-top: 12px;
   border-style: dashed;
 }
-
 </style>
