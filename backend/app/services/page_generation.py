@@ -383,26 +383,26 @@ def _build_page_prompt(
 - 页面意图：{intent or "无"}
 - 用户补充要求：{user_notes or "无"}
 
-## 参考资料（证据 ID 如 {evidence_hits[0].get('evidence_id', 'ev_X') if evidence_hits else 'ev_X'} 等，选择相关度最高的 0-1 条填入）
+## 参考资料（仅供撰写内容时参考，勿在输出中填写证据编号）
 {evidence_block}
 
 ## 输出要求
 只输出一个JSON对象：
 {{
-  "key_message": "本页最核心的一句话结论（15字以内，听众走出会场记住的那句话）",
+  "key_message": "本页核心结论（1～2 句，约 20～40 字，说清楚「这页要证明什么」）",
   "bullets": [
-    {{"bullet_id": "{slide_id}-b1", "text": "要点内容", "evidence_ids": ["ev_1"]}}
+    {{"bullet_id": "{slide_id}-b1", "text": "要点：含关键信息、依据或例子，单条约 40～80 字"}}
   ],
-  "speaker_notes": "讲者备注，2-4句可讲述话术，含过渡到下页的衔接",
+  "speaker_notes": "讲者备注：4～6 句可讲述话术，含本页展开顺序与过渡到下页",
   "visual_suggestion": "建议配图或图表类型（如：柱状图对比、流程图、示意图），若无必要可填null",
-  "takeaway": "听众行动建议或关键启示，一句话（若本页是纯背景铺垫可填null）"
+  "takeaway": "页级小结：1～2 句行动建议或启示（背景页可填 null）"
 }}
 
 硬性要求：
-1) bullets 至少 2 个，最多 6 个；
-2) 每个 bullet 可引用 0-1 条证据，仅在内容确实来自某条参考资料时引用，与内容无关的证据不要引用；
-3) bullet 与证据的匹配依据是语义相关性，不是顺序；
-4) key_message 必须输出字符串，不得为 null；
+1) bullets 至少 2 个，最多 6 个；每条 bullet 只含 bullet_id 与 text，不要填写证据编号字段；
+2) 每条 bullet 的 text 必须具体、可讲，避免「加强XX」「提升YY」等空话；有参考资料时融入事实、数据或案例表述；
+3) key_message 必须输出非空字符串，与 bullets 内容一致、可独立读懂；
+4) 要点内容若来自参考资料，在 text 中自然表述即可；证据引用由系统在生成后自动绑定；
 5) 不要输出 Markdown，不要输出解释文字，只输出 JSON。"""
 
 
@@ -475,15 +475,10 @@ def _generate_single_page(
         for jdx, bullet in enumerate(bullets_in[:6], start=1):
             if not isinstance(bullet, dict):
                 continue
-            eids = bullet.get("evidence_ids", [])
-            if not isinstance(eids, list):
-                eids = []
-            valid_ids = {str(h.get("evidence_id") or "") for h in evidence_hits if h.get("evidence_id")}
-            eids = [str(e) for e in eids if str(e) in valid_ids]
             bullets.append({
                 "bullet_id": str(bullet.get("bullet_id") or f"{slide_id}-b{jdx}"),
                 "text": str(bullet.get("text") or "待补充要点"),
-                "evidence_ids": eids[:1],
+                "evidence_ids": [],
             })
         if len(bullets) < 2:
             bullets.append({"bullet_id": f"{slide_id}-b{len(bullets)+1}", "text": "待补充要点", "evidence_ids": []})

@@ -164,8 +164,8 @@ def test_build_page_prompt_includes_evidence() -> None:
     assert "paper.pdf" in prompt
     assert "https://example.com" in prompt
     assert "s1-b1" in prompt  # bullet_id template
-    assert "evidence_ids" in prompt
-    assert "0-1" in prompt  # allows selective reference
+    assert '"evidence_ids"' not in prompt
+    assert "不要填写证据编号" in prompt
 
 
 def test_build_page_prompt_no_evidence() -> None:
@@ -622,10 +622,10 @@ def test_match_bullets_partial_match() -> None:
     assert low == 1
 
 
-# ── R2: LLM evidence_ids preserved ─────────────────────────
+# ── A2: LLM must not supply evidence_ids (backend binds later) ──
 
 
-def test_generate_single_page_preserves_llm_evidence_ids(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_generate_single_page_ignores_llm_evidence_ids(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr(page_generation.settings, "use_real_llm", True)
     monkeypatch.setattr(page_generation.settings, "openai_api_key", "test-key")
     slide = {"slide_id": "s1", "title": "测试页", "intent": "", "user_notes": ""}
@@ -648,9 +648,8 @@ def test_generate_single_page_preserves_llm_evidence_ids(monkeypatch) -> None:  
     from app.services.page_generation import _generate_single_page  # noqa: F811
 
     result = _generate_single_page("AI教育", slide, evidence)
-    # ev_1 should be preserved since it's in the evidence list
     assert result["bullets"][0]["text"] == "要点A"
-    assert result["bullets"][0]["evidence_ids"] == ["ev_1"]
+    assert result["bullets"][0]["evidence_ids"] == []
     assert result["bullets"][1]["evidence_ids"] == []
 
 

@@ -1,7 +1,7 @@
 # API 与数据结构契约（v1）
 
-**版本**：v1.0.0（定稿）  
-**生效**：新功能（骨架、按页生成、进度、编辑）以本文件为准。  
+**版本**：v1.0.0（定稿）；**v1.1.0 扩展**见 §9（第 10 周约定字段）  
+**生效**：新功能（骨架、按页生成、进度、编辑）以本文件为准；长文档画像、章节、附件、检索策略、列表轻量项以 §9 为准。  
 **Base URL**：本地开发 `http://127.0.0.1:8000`；前端 Vite 将 `/api` 代理到此后端。
 
 **与 v0 关系**：[`api_contract_v0.md`](api_contract_v0.md) 中的创建任务、澄清、列表、导出、`Outline` 结构、`RetrievalHit` 等**继续有效**。v1 新增字段与接口；`POST /api/tasks/{task_id}/generate`（一次性全量生成）标记为**遗留**，新前端走 v1 流程。
@@ -68,8 +68,20 @@
 
 ### 1.6 契约版本字段
 
-- 任务快照：`schema_version`，v1 实现建议 `"v1.0.0"`
-- 大纲：`outline.meta.schema_version`，建议 `"v1.0.0"`
+- 任务快照：`schema_version`，v1 实现建议 `"v1.0.0"`；含 §9 扩展时建议 `"v1.1.0"`
+- 大纲：`outline.meta.schema_version`，建议 `"v1.0.0"` 或 `"v1.1.0"`
+
+### 1.7 来源质量 `SourceQuality`（§9 `retrieval_policy`）
+
+`low` | `medium` | `high`（全小写）。未传时由服务端默认，通常等价于 `medium`。
+
+### 1.8 附件状态 `AttachmentStatus`（§9 `attachments`）
+
+`pending` | `ready` | `failed`（全小写）。
+
+### 1.9 长文档分析状态 `DocumentAnalysisStatus`（§9 `runtime`，可选）
+
+`pending` | `running` | `done` | `failed`。表示 `document_profile` 是否已完成大模型预处理；规则字段可先由服务端同步写入。
 
 ---
 
@@ -110,7 +122,44 @@
     "current": null,
     "total": 6,
     "message": "骨架已生成，请确认每页主题",
-    "percent": null
+    "percent": null,
+    "slide_id": null,
+    "completed": null,
+    "failed": null
+  },
+  "input": {
+    "topic": "演示主题",
+    "source_type": "long_document",
+    "retrieval_depth": "L1",
+    "document_title": "可选标题",
+    "document_profile": {
+      "summary": "全文摘要（规则或 LLM）",
+      "key_points": ["要点一", "要点二"],
+      "suggested_focus": "可选，建议 PPT 侧重",
+      "segments": ["分段原文片段…"],
+      "segment_count": 12,
+      "char_count": 5200,
+      "keywords": ["可选", "规则提取"]
+    },
+    "attachments": [
+      {
+        "document_id": "doc_abc",
+        "filename": "参考材料.pdf",
+        "status": "ready",
+        "chunk_count": 42
+      }
+    ]
+  },
+  "runtime": {
+    "document_analysis_status": "done",
+    "retrieval_policy": {
+      "retrieval_depth": "L1",
+      "tavily_enabled": true,
+      "prefer_user_doc": true,
+      "source_quality": "medium",
+      "force_refresh": false,
+      "enable_fallback_deepen": true
+    }
   },
   "error": null
 }
@@ -118,18 +167,24 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `clarification` | object \| null | 同 v0 |
+| `clarification` | object \| null | 同 v0；**不得**含 `options`、题型等字段（§9.3） |
 | `outline_skeleton` | `OutlineSkeleton` \| null | 未生成骨架前为 `null` |
-| `outline` | `Outline` \| null | 按页生成完成后为完整大纲；见 §5 |
+| `outline` | `Outline` \| null | 按页生成完成后为完整大纲；见 §4.3、§9.2 |
 | `progress` | `Progress` \| null | 无后台任务时可 `null`；生成中建议非空 |
+| `input` | `TaskInput` \| null | v1.1：任务创建参数子集；**可不返回** `document_text`（过长） |
+| `runtime` | `TaskRuntime` \| null | v1.1：编排与检索策略；见 §9.4 |
 | `error` | object \| null | 同 v0；`failed` 时建议非空 |
 
-列表 `GET /api/tasks`、`GET /api/tasks/export` 中每项任务快照**同形**（可截断大字段由实现决定，但字段名须一致）。
+- **`GET /api/tasks/{task_id}`**：建议返回上表全部顶层字段；`input` / `runtime` 在 v1.0 客户端可忽略。
+- **`GET /api/tasks`**：列表项为 **轻量形状**（§9.6），**不要**要求与单条 `GET` 同形。
+- **`GET /api/tasks/export`**：可与单条 `GET` 同形，或按评测需要截断大字段；字段名须一致。
 
-### 2.2 创建任务、澄清（同 v0）
+### 2.2 创建任务、澄清（同 v0，v1.1 补充）
 
-- **`POST /api/tasks`**：请求/响应见 v0 §2.1。实现创建后 `status` 多为 `clarifying`。
-- **`PATCH /api/tasks/{task_id}/clarification`**：见 v0 §2.3。`submitted=true` → `status=pending`。
+- **`POST /api/tasks`**：请求/响应见 v0 §2.1。实现创建后 `status` 多为 `clarifying`。  
+  - `source_type=long_document` 时，服务端在 `input.document_profile` 写入规则字段（§9.1）；大模型 enrichment 完成后可更新同对象并置 `runtime.document_analysis_status=done`。
+- **`PATCH /api/tasks/{task_id}/clarification`**：见 v0 §2.3。`submitted=true` → `status=pending`。  
+  - 澄清题为**动态文本题**：`questions[]` 仅含 `question_id`、`prompt`、`answer`（§9.3）；由规则或模型生成，**无**选择题 `options`。
 
 ### 2.3 任务列表与导出、失败重试（同 v0）
 
@@ -214,11 +269,21 @@
 ```json
 {
   "idempotency_key": "optional-string",
-  "concurrency": 2
+  "concurrency": 2,
+  "retrieval_policy": {
+    "retrieval_depth": "L1",
+    "tavily_enabled": true,
+    "prefer_user_doc": true,
+    "source_quality": "medium",
+    "force_refresh": false,
+    "enable_fallback_deepen": true
+  }
 }
 ```
 
 - `concurrency`：同时处理的页数上限，默认由服务端配置（建议 1–3）；超出范围忽略或 `422`。
+- `retrieval_policy`：可选；见 §9.4。传入字段与 `task.runtime.retrieval_policy` **合并**后持久化；未传键沿用任务已有值或 `.env` / 服务端默认。
+- **兼容**：仍允许在请求体顶层传 `retrieval_depth`、`tavily_enabled`、`force_refresh`（与 v1.0 实现一致）；与 `retrieval_policy` 同时出现时，以 **`retrieval_policy` 内同名键为准**。
 
 响应 **`202 Accepted`**：
 
@@ -319,6 +384,29 @@
 
 ---
 
+### 3.6 上传参考文档（v1.1，RAG 附件）
+
+**`POST /api/tasks/{task_id}/documents/upload`**
+
+**前置**：任务存在；`status` 非 `generating`（实现可放宽为仅禁止并发上传）→ 冲突时 `409`。
+
+请求：`multipart/form-data`，字段名 `file`（单文件；格式与大小上限由服务端配置并在 413/415 时返回 `VALIDATION_ERROR`）。
+
+响应 **`201 Created`** 或 **`200 OK`**（幂等重复上传同一文件名由实现决定）：
+
+```json
+{
+  "document_id": "doc_abc",
+  "filename": "参考材料.pdf",
+  "status": "pending",
+  "chunk_count": null
+}
+```
+
+处理完成后，对应项出现在 `GET` 快照的 `input.attachments[]` 中，`status` 变为 `ready` 或 `failed`；`chunk_count` 在 `ready` 时建议非空。
+
+---
+
 ## 4. 数据结构
 
 ### 4.1 `Progress`
@@ -330,6 +418,9 @@
 | `total` | integer \| null | 否 | 总页数 |
 | `message` | string | 否 | 面向用户的短句 |
 | `percent` | integer \| null | 否 | 0–100，估算值即可 |
+| `slide_id` | string \| null | 否 | 按页生成/重生成时**当前页** id |
+| `completed` | integer \| null | 否 | 已成功完成的页数（从 0 或 1 起算由实现固定，前后端须一致） |
+| `failed` | integer \| null | 否 | 已失败页数（若支持单页失败继续） |
 
 ### 4.2 `OutlineSkeleton`
 
@@ -353,11 +444,59 @@
 | `intent` | string \| null | LLM 生成骨架时的意图摘要 |
 | `user_notes` | string \| null | 用户编辑，供按页生成时读取 |
 
-### 4.3 `Outline`（完整大纲，同 v0）
+### 4.3 `Outline`（完整大纲，同 v0 + v1.1）
 
-`Task.outline` 形状见 v0 §3，不重复。补充约定：
+在 v0 §3 基础上，每页 `slides[]` 项增加（均可选，按页生成稳定输出）：
 
-- 按页生成完成后，`outline.slides.length` 应与 `outline_skeleton.length` 一致（除非实现明确支持不等长，v1 **要求一致**）。
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `key_message` | string \| null | 本页核心结论一句话 |
+| `visual_suggestion` | string \| null | 配图/图表/版式建议 |
+| `takeaway` | string \| null | 听众应带走的一句话或行动 |
+
+章节（§9.2，二选一中的**推荐**写法）：
+
+```json
+{
+  "title": "整份演示的主标题",
+  "chapters": [
+    {
+      "chapter_id": "ch1",
+      "title": "第一章 背景",
+      "slide_ids": ["s1", "s2"]
+    }
+  ],
+  "slides": [
+    {
+      "slide_id": "s1",
+      "title": "本页标题",
+      "chapter_id": "ch1",
+      "key_message": "…",
+      "bullets": [],
+      "speaker_notes": null,
+      "visual_suggestion": null,
+      "takeaway": null
+    }
+  ],
+  "evidence_catalog": [],
+  "page_evidence_map": [
+    {
+      "slide_id": "s1",
+      "evidence_ids": ["ev_1"],
+      "coverage": 0.8
+    }
+  ],
+  "meta": { "schema_version": "v1.1.0" }
+}
+```
+
+- **`outline.chapters[]`（推荐）**：`chapter_id`、`title`、`slide_ids[]`（顺序即章内页序）。生成骨架或按页流程结束时写入。
+- **`slide.chapter_id`（可选）**：与 `chapters` 冗余时须一致；仅实现章归属、不维护 `chapters` 数组时，可**仅**使用 `slide.chapter_id`，但全组须统一一种方案。
+- **`page_evidence_map`**：按页汇总 `evidence_ids` 及可选 `coverage`（0–1）；由服务端根据 `slides[].bullets[].evidence_ids` 维护，客户端只读。
+
+其余约定：
+
+- 按页生成完成后，`outline.slides.length` 应与 `outline_skeleton.length` 一致（v1 **要求一致**）。
 - `evidence_ids` 由服务端在检索后注入；LLM 不应作为证据来源（实现约束，非 HTTP 字段）。
 - `meta` 可含 `retrieval_depth`、`generated_at`、`schema_version`；扩展键与 v0 相同规则。
 
@@ -411,12 +550,126 @@ POST /api/tasks
 
 ## 8. 协作提示
 
-- Mock：`GET` 体须含 `progress`、`outline_skeleton` 字段（可为 `null`）。
-- 评测：除 `outline` 完整性外，可增加 `outline_skeleton` 与 `progress.phase` 枚举校验。
+- Mock：`GET` 体须含 `progress`、`outline_skeleton` 字段（可为 `null`）；v1.1 Mock 建议含 `input.topic`、`input.document_profile`（长文档场景）。
+- 评测：除 `outline` 完整性外，可增加 `outline_skeleton`、`progress.phase`、§9.6 列表轻量项校验。
 - 状态机详图见 [`management/task_state_flow.md`](management/task_state_flow.md)。
+- 第 10 周字段分工与验收见 [`management/week10计划.txt`](management/week10计划.txt) §七。
 
 ---
 
-## 9. 变更记录
+## 9. v1.1.0 扩展字段（第 10 周约定）
 
+下列名称与 [`management/week10计划.txt`](management/week10计划.txt) §七一致；实现前须全组确认，**不得**擅自改名。
+
+### 9.1 `DocumentProfile`（`task.input.document_profile`）
+
+长文档（`source_type=long_document`）或分析完成后存在；短主题可为 `null`。
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `summary` | string | 是 | 全文摘要；可先规则截断，再由 LLM 覆盖 |
+| `key_points` | string[] | 是 | 3–12 条要点句 |
+| `suggested_focus` | string \| null | 否 | 建议 PPT 叙事侧重（LLM） |
+| `segments` | string[] | 否 | 规则分段原文片段，供检索/出题 |
+| `segment_count` | integer | 否 | 分段数量 |
+| `char_count` | integer | 否 | 正文字符数 |
+| `keywords` | string[] | 否 | 规则关键词，可选保留 |
+
+**合并规则**：LLM 预处理（B1）只覆盖/增强 `summary`、`key_points`、`suggested_focus`；**不得删除**已有 `segments`、`segment_count`、`char_count`、`keywords` 等规则字段。
+
+### 9.2 `Chapter`（`outline.chapters[]`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `chapter_id` | string | 章唯一 id，任务内唯一 |
+| `title` | string | 章标题 |
+| `slide_ids` | string[] | 属于本章的 `slide_id`，顺序即演示顺序 |
+
+与 §4.3 `slide.chapter_id` 的关系见 §4.3。
+
+### 9.3 `ClarificationQuestion`（不变 + 禁止项）
+
+与 v0 相同，每项仅：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `question_id` | string | 稳定 id（规则或模型分配） |
+| `prompt` | string | 展示给用户的题干 |
+| `answer` | string \| null | 用户文本答案；未答为 `null` |
+
+**禁止**在 `questions[]` 或 `clarification` 上出现：`options`、`type`、`choices`、`input_type` 等选择题/题型字段。模型澄清（B3）也仅输出上述三字段。
+
+### 9.4 `RetrievalPolicy`（`task.runtime.retrieval_policy`）
+
+由 `POST .../slides/generate` 请求体传入或创建时默认；持久化在 `runtime`，按页生成与单页重生成读取。
+
+| 字段 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `retrieval_depth` | `RetrievalDepth` | 任务 `input.retrieval_depth` 或 `L1` | 检索深度 |
+| `tavily_enabled` | boolean | 环境配置 | 是否启用 Tavily |
+| `prefer_user_doc` | boolean | `true`（长文档时） | 优先用户文档片段 |
+| `source_quality` | `SourceQuality` | `medium` | 来源质量过滤阈值 |
+| `force_refresh` | boolean | `false` | 忽略检索缓存 |
+| `enable_fallback_deepen` | boolean | `true` | 证据不足时是否加深检索 |
+
+未传的键：**不写入**或保留任务已有值；最终缺省由服务端 `.env` 补齐。实现可将合并结果同步到 `runtime.generation_*` 等内部键，但对外以 `retrieval_policy` 为准。
+
+### 9.5 `Attachment`（`task.input.attachments[]`）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `document_id` | string | 附件唯一 id |
+| `filename` | string | 原始文件名 |
+| `status` | `AttachmentStatus` | `pending` \| `ready` \| `failed` |
+| `chunk_count` | integer \| null | 分块数；`ready` 时建议非空 |
+
+上传接口见 §3.6。
+
+### 9.6 `TaskListItem`（`GET /api/tasks` 列表项）
+
+列表**至少**包含：
+
+```json
+{
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "input": { "topic": "演示主题" },
+  "status": "done",
+  "updated_at": "2026-06-02T10:00:00+08:00"
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `task_id` | string | 任务 id |
+| `input.topic` | string | 创建时的主题（历史列表展示用） |
+| `status` | `TaskStatus` | 五枚举 |
+| `updated_at` | string (ISO 8601) | 最后更新时间 |
+
+实现可附加 `created_at`、`source_type` 等，但**不得**用未文档化字段替代上表四元组。`export` 接口可返回更完整快照，见 §2.1。
+
+### 9.7 `TaskInput` / `TaskRuntime`（`GET` 快照子对象）
+
+**`TaskInput`**（`GET` 返回的子集，不含全文 `document_text` 除非产品明确要求）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `topic` | string | 同创建请求 |
+| `source_type` | string | `short_topic` \| `long_document` |
+| `retrieval_depth` | `RetrievalDepth` | 创建时选择 |
+| `document_title` | string \| null | 可选 |
+| `document_profile` | `DocumentProfile` \| null | §9.1 |
+| `attachments` | `Attachment[]` | §9.5，默认 `[]` |
+
+**`TaskRuntime`**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `document_analysis_status` | `DocumentAnalysisStatus` \| null | 长文档 LLM 预处理状态 |
+| `retrieval_policy` | `RetrievalPolicy` \| null | §9.4 |
+
+---
+
+## 10. 变更记录
+
+- **v1.1.0**（2026-06-02）：第 10 周约定。新增 `input.document_profile`、`input.attachments`、`runtime.retrieval_policy`、`runtime.document_analysis_status`；`outline.chapters` / `slide.chapter_id`、`page_evidence_map`、页级 `key_message` / `visual_suggestion` / `takeaway`；澄清题禁止 `options`；`GET /api/tasks` 列表轻量项；`POST .../documents/upload`；`Progress` 增量字段；`slides/generate` 请求 `retrieval_policy`。
 - **v1.0.0**（2026-05-18）：定稿。新增 `progress`、`outline_skeleton`、`WorkflowPhase`；新增 skeleton / slides/generate / outline PATCH / slide regenerate；明确 v0 继承关系与遗留 `generate`。

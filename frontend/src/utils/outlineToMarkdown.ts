@@ -11,6 +11,11 @@ export function outlineToMarkdown(outline: Outline): string {
     lines.push(`## ${slide.title || slide.slide_id}`)
     lines.push('')
 
+    if (slide.key_message?.trim()) {
+      lines.push(`**核心结论：** ${slide.key_message.trim()}`)
+      lines.push('')
+    }
+
     for (const bullet of slide.bullets) {
       const evidenceRefs =
         bullet.evidence_ids.length > 0
@@ -20,9 +25,19 @@ export function outlineToMarkdown(outline: Outline): string {
     }
     lines.push('')
 
+    if (slide.visual_suggestion?.trim()) {
+      lines.push(`*配图建议：${slide.visual_suggestion.trim()}*`)
+      lines.push('')
+    }
+
     if (slide.speaker_notes) {
       const notes = slide.speaker_notes.replace(/\n/g, ' ')
       lines.push(`> 讲者备注：${notes}`)
+      lines.push('')
+    }
+
+    if (slide.takeaway?.trim()) {
+      lines.push(`**页级小结：** ${slide.takeaway.trim()}`)
       lines.push('')
     }
   }
