@@ -195,15 +195,22 @@ const isRegenerating = computed(() =>
 
 .deck-main {
   min-width: 0;
+  overflow-y: auto;
+  max-height: calc(100vh - 200px);
+  padding-right: 12px;
 }
 
 .deck-nav {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #e3e8f0;
+  margin-bottom: 4px;
+  padding: 1px 0 3px;
+  border-bottom: 1px solid #f0f2f5;
+  position: sticky;
+  top: 0;
+  background: #fff;
+  z-index: 3;
 }
 
 .nav-pos {
@@ -241,9 +248,10 @@ const isRegenerating = computed(() =>
 }
 
 button.small {
-  padding: 6px 12px;
+  padding: 4px 14px;
   font-size: 13px;
   white-space: nowrap;
+  line-height: 1.35;
 }
 
 @media (max-width: 720px) {
