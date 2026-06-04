@@ -338,7 +338,7 @@ export async function generateSlides(
     },
   }
 
-  return currentTask
+  return currentTask!
 }
 
 export async function regenerateSlide(

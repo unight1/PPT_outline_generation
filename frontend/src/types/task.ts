@@ -96,6 +96,11 @@ export interface Outline {
   title: string
   slides: Slide[]
   evidence_catalog: Evidence[]
+  page_evidence_map?: Array<{
+    slide_id: string
+    slide_title: string
+    evidence_trace: Array<Record<string, unknown>>
+  }>
   meta: {
     retrieval_depth?: RetrievalDepth
     generated_at?: string
