@@ -19,6 +19,9 @@ import {
   apiModeLabel,
 } from './api'
 import { outlineToMarkdown } from './utils/outlineToMarkdown'
+import SlideDeckView from './components/SlideDeckView.vue'
+import GeneratingView from './components/GeneratingView.vue'
+import TaskSidebar from './components/TaskSidebar.vue'
 
 type ViewName = 'form' | 'status' | 'skeleton' | 'result'
 
@@ -51,7 +54,7 @@ const incrementalSlides = computed(() => {
         title: generated?.title ?? slide.title,
         index,
         slide: generated ?? null,
-        status: generated ? 'done' : 'generating',
+        status: (generated ? 'done' : 'generating') as 'done' | 'generating' | 'failed',
       }
     })
   }
@@ -61,7 +64,7 @@ const incrementalSlides = computed(() => {
     title: slide.title,
     index,
     slide,
-    status: 'done',
+    status: 'done' as const,
   }))
 })
 
@@ -501,6 +504,18 @@ function handleDownloadMarkdown() {
   a.click()
   URL.revokeObjectURL(url)
 }
+
+function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { slides: (infer S)[] } | null ? S : never) {
+  if (!outlineDraft.value) return
+  outlineDraft.value = {
+    ...outlineDraft.value,
+    slides: outlineDraft.value.slides.map((s) =>
+      (s as { slide_id: string }).slide_id === (updatedSlide as { slide_id: string }).slide_id
+        ? { ...s, ...updatedSlide }
+        : s,
+    ),
+  }
+}
 </script>
 
 <template>
@@ -514,9 +529,10 @@ function handleDownloadMarkdown() {
     </section>
 
     <section class="steps">
-      <div :class="['step', view === 'form' && 'active']">1. 填写需求</div>
-      <div :class="['step', (view === 'status' || view === 'skeleton') && 'active']">2. 骨架确认</div>
-      <div :class="['step', view === 'result' && 'active']">3. 大纲结果</div>
+      <div :class="['step', view === 'form' && 'active']">1. 基本信息</div>
+      <div :class="['step', view === 'status' && 'active']">2. 回答问题</div>
+      <div :class="['step', view === 'skeleton' && 'active']">3. 确认骨架</div>
+      <div :class="['step', view === 'result' && 'active']">4. 查看大纲</div>
     </section>
 
     <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
@@ -640,46 +656,6 @@ function handleDownloadMarkdown() {
         </p>
       </div>
 
-      <div v-if="showIncrementalOutline" class="partial-outline">
-        <h3>生成中的页面预览</h3>
-        <p class="hint">
-          已完成 {{ task?.progress?.completed ?? task?.outline?.meta?.completed_pages ?? 0 }}
-          / {{ task?.progress?.total ?? task?.outline?.meta?.total_pages ?? incrementalSlides.length }}
-          页
-          <span v-if="task?.progress?.failed">
-            ，失败 {{ task?.progress?.failed }} 页
-          </span>
-        </p>
-
-        <article
-          v-for="item in incrementalSlides"
-          :key="item.slide_id"
-          class="slide partial-slide"
-        >
-          <h4>
-            第 {{ item.index + 1 }} 页 / {{ item.slide_id }}：{{ item.title }}
-          </h4>
-
-          <template v-if="item.slide">
-            <ul>
-              <li
-                v-for="bullet in item.slide.bullets"
-                :key="bullet.bullet_id"
-              >
-                {{ bullet.text }}
-              </li>
-            </ul>
-            <p v-if="item.slide.speaker_notes" class="notes">
-              讲者备注：{{ item.slide.speaker_notes }}
-            </p>
-          </template>
-
-          <p v-else class="hint">
-            该页生成中，请稍候…
-          </p>
-        </article>
-      </div>
-
       <div v-if="task.status === 'failed'" class="failed-box">
         <strong>任务失败：{{ taskErrorLabel }}</strong>
         <p>错误码：{{ task.error?.code ?? 'UNKNOWN' }}</p>
@@ -699,46 +675,6 @@ function handleDownloadMarkdown() {
       <p v-if="progressText" class="hint">{{ progressText }}</p>
       <div v-if="task.progress?.percent !== null && task.progress?.percent !== undefined" class="progress-bar">
         <div class="progress-fill" :style="{ width: `${task.progress.percent}%` }" />
-      </div>
-
-      <div v-if="showIncrementalOutline" class="partial-outline">
-        <h3>生成中的页面预览</h3>
-        <p class="hint">
-          已完成 {{ task?.progress?.completed ?? task?.outline?.meta?.completed_pages ?? 0 }}
-          / {{ task?.progress?.total ?? task?.outline?.meta?.total_pages ?? incrementalSlides.length }}
-          页
-          <span v-if="task?.progress?.failed">
-            ，失败 {{ task?.progress?.failed }} 页
-          </span>
-        </p>
-
-        <article
-          v-for="item in incrementalSlides"
-          :key="item.slide_id"
-          class="slide partial-slide"
-        >
-          <h4>
-            第 {{ item.index + 1 }} 页 / {{ item.slide_id }}：{{ item.title }}
-          </h4>
-
-          <template v-if="item.slide">
-            <ul>
-              <li
-                v-for="bullet in item.slide.bullets"
-                :key="bullet.bullet_id"
-              >
-                {{ bullet.text }}
-              </li>
-            </ul>
-            <p v-if="item.slide.speaker_notes" class="notes">
-              讲者备注：{{ item.slide.speaker_notes }}
-            </p>
-          </template>
-
-          <p v-else class="hint">
-            该页生成中，请稍候…
-          </p>
-        </article>
       </div>
 
       <div v-if="!skeletonSlides.length" class="empty-box">
@@ -836,9 +772,7 @@ function handleDownloadMarkdown() {
       </div>
     </section>
 
-    <!-- ═══════════════════════════════════════════════════════
-         C2: 结果页 — 展示并编辑完整大纲（含 B1 新增字段）
-    ════════════════════════════════════════════════════════════ -->
+    <!-- A4: 结果页 · 一页一屏翻页工作台 -->
     <section v-if="view === 'result' && outlineDraft" class="card">
       <div class="result-header">
         <div>
@@ -872,129 +806,35 @@ function handleDownloadMarkdown() {
         <input v-model="outlineDraft.title" />
       </label>
 
-      <div class="outline">
-        <article
-          v-for="(slide, index) in outlineDraft.slides"
-          :key="slide.slide_id"
-          class="slide"
-        >
-          <!-- 页头：序号 + 重生成按钮 -->
-          <div class="slide-header">
-            <h3>第 {{ index + 1 }} 页 / {{ slide.slide_id }}</h3>
-            <button
-              class="secondary small"
-              :disabled="regeneratingSlideId !== null"
-              type="button"
-              @click="handleRegenerateSlide(slide.slide_id)"
-            >
-              {{ regeneratingSlideId === slide.slide_id ? '重生成中...' : '重新生成' }}
-            </button>
-          </div>
+      <div class="result-body">
+        <SlideDeckView
+          :outline="outlineDraft"
+          :task-progress="task?.progress ?? null"
+          :regenerating-slide-id="regeneratingSlideId"
+          :saving="savingOutline"
+          :save-message="saveMessage"
+          @save="handleSaveOutline"
+          @restart="restart"
+          @regenerate="handleRegenerateSlide"
+          @copy-markdown="handleCopyMarkdown"
+          @download-markdown="handleDownloadMarkdown"
+          @update:slide="handleUpdateSlide"
+        />
 
-          <!-- 重生成进度条 -->
-          <div
-            v-if="regeneratingSlideId === slide.slide_id && task?.progress"
-            class="progress-box"
-          >
-            <strong>{{ task.progress.message || '正在重新生成该页...' }}</strong>
-            <p class="hint">
-              当前阶段：{{ task.progress.phase }}
-              <span v-if="task.progress.current != null && task.progress.total != null">
-                ｜{{ task.progress.current }} / {{ task.progress.total }}
-              </span>
-            </p>
-            <div
-              v-if="typeof task.progress.percent === 'number'"
-              class="progress-track"
-            >
-              <div
-                class="progress-fill"
-                :style="{ width: `${task.progress.percent}%` }"
-              />
-            </div>
-          </div>
-
-          <!-- 页面标题 -->
-          <label class="field">
-            页面标题
-            <input v-model="slide.title" />
-          </label>
-
-          <!-- C2/B1: 核心结论（key_message） -->
-          <label class="field">
-            核心结论
-            <span class="field-hint">听众走出会场能记住的一句话</span>
-            <input
-              v-model="slide.key_message"
-              placeholder="例如：AI 辅助工具可将大纲起草时间缩短 60%"
-            />
-          </label>
-
-          <!-- 要点列表 -->
-          <div class="bullets">
-            <label
-              v-for="bullet in slide.bullets"
-              :key="bullet.bullet_id"
-              class="field"
-            >
-              要点 {{ bullet.bullet_id }}
-              <textarea v-model="bullet.text" rows="2" />
-              <small
-                v-if="bullet.evidence_ids.length"
-                class="evidence-tag"
-              >
-                证据：{{ bullet.evidence_ids.join(', ') }}
-              </small>
-            </label>
-          </div>
-
-          <!-- 讲者备注 -->
-          <label class="field">
-            讲者备注
-            <textarea v-model="slide.speaker_notes" rows="3" />
-          </label>
-
-          <!-- C2/B1: 配图建议（visual_suggestion） -->
-          <label class="field">
-            配图 / 图表建议
-            <span class="field-hint">可选，留空表示无特殊配图需求</span>
-            <input
-              v-model="slide.visual_suggestion"
-              placeholder="例如：柱状图对比传统与 AI 辅助耗时"
-            />
-          </label>
-
-          <!-- C2/B1: 听众行动建议（takeaway） -->
-          <label class="field">
-            听众行动建议
-            <span class="field-hint">可选，背景页可留空</span>
-            <input
-              v-model="slide.takeaway"
-              placeholder="例如：评估自己的场景是否适合引入 AI 工具"
-            />
-          </label>
-        </article>
+        <TaskSidebar show-history />
       </div>
 
-      <!-- 证据目录 -->
-      <section class="evidence">
-        <h3>证据目录</h3>
-        <article
-          v-for="evidence in outlineDraft.evidence_catalog"
-          :key="evidence.evidence_id"
-          class="evidence-card"
-        >
-          <strong>{{ evidence.evidence_id }}</strong>
-          <p>{{ evidence.snippet }}</p>
-          <small>
-            来源：{{ evidence.source_id }} · 位置：{{ evidence.locator }} ·
-            score：{{ evidence.score ?? '无' }} · confidence：{{ evidence.confidence ?? '无' }}
-          </small>
-        </article>
-      </section>
     </section>
   </main>
-</template>
+
+    <!-- Generating progress dialog -->
+    <GeneratingView
+      v-if="showIncrementalOutline && task"
+      :task="task"
+      :slides="incrementalSlides"
+      @close="() => {}"
+    />
+  </template>
 
 <style scoped>
 .page {
@@ -1031,8 +871,8 @@ h1 {
 
 .steps {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
   margin-bottom: 20px;
 }
 
@@ -1199,6 +1039,20 @@ button.small {
   white-space: nowrap;
 }
 
+.result-body {
+  display: grid;
+  grid-template-columns: 1fr 240px;
+  gap: 24px;
+  align-items: start;
+  margin-top: 16px;
+}
+
+@media (max-width: 900px) {
+  .result-body {
+    grid-template-columns: 1fr;
+  }
+}
+
 .slide {
   margin-top: 16px;
   padding: 18px;
@@ -1223,25 +1077,6 @@ button.small {
 }
 
 .notes {
-  color: #5d6b82;
-}
-
-.evidence {
-  margin-top: 28px;
-}
-
-.evidence-card {
-  margin-top: 12px;
-  padding: 14px;
-  border-radius: 12px;
-  background: #f7f9fc;
-}
-
-.evidence-card p {
-  margin: 8px 0;
-}
-
-.evidence-card small {
   color: #5d6b82;
 }
 
@@ -1280,7 +1115,10 @@ button.small {
 }
 
 @media (max-width: 720px) {
-  .steps,
+  .steps {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
   .status-box,
   .actions,
   .result-header {
@@ -1331,24 +1169,4 @@ button.small {
   margin-top: 24px;
 }
 
-.evidence-card {
-  margin-top: 12px;
-  padding: 12px;
-  border-radius: 12px;
-  background: #f8fafc;
-  border: 1px solid #e5e7eb;
-}
-
-.partial-outline {
-  margin-top: 20px;
-  padding: 16px;
-  border-radius: 14px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-}
-
-.partial-slide {
-  margin-top: 12px;
-  border-style: dashed;
-}
 </style>
