@@ -8,7 +8,7 @@ from typing import Literal
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field, model_validator
 
 from app.config import settings
@@ -17,11 +17,13 @@ from app.task_store import list_tasks as db_list_tasks
 from app.task_store import list_tasks_by_status as db_list_tasks_by_status
 from app.task_store import save_task as db_save_task
 from app.task_store import store_available
+from app.services.clarification import build_clarification_questions, build_fallback_clarification_questions
 from app.services.document_processing import build_document_profile
 from app.services.generation import should_force_fail
 from app.services.orchestration import generate_outline_with_research
 from app.services.page_generation import SlideWorkflowError, generate_pages_from_skeleton
 from app.services.skeleton import generate_outline_skeleton
+from app.services.task_documents import DocumentUploadError, public_attachment, save_task_document
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = logging.getLogger(__name__)
@@ -43,6 +45,12 @@ class RetrievalDepth(str, Enum):
     l0 = "L0"
     l1 = "L1"
     l2 = "L2"
+
+
+class SourceQuality(str, Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"
 
 
 WorkflowPhase = Literal[
@@ -149,6 +157,16 @@ class GenerateSlidesRequest(BaseModel):
     force_refresh: bool = False
     retrieval_depth: RetrievalDepth | None = None
     tavily_enabled: bool | None = None
+    retrieval_policy: "RetrievalPolicyRequest | None" = None
+
+
+class RetrievalPolicyRequest(BaseModel):
+    retrieval_depth: RetrievalDepth | None = None
+    tavily_enabled: bool | None = None
+    prefer_user_doc: bool | None = None
+    source_quality: SourceQuality | None = None
+    force_refresh: bool | None = None
+    enable_fallback_deepen: bool | None = None
 
 
 class OutlineBullet(BaseModel):
@@ -202,6 +220,13 @@ class RegenerateSlideRequest(BaseModel):
     user_instruction: str | None = None
 
 
+class DocumentUploadResponse(BaseModel):
+    document_id: str
+    filename: str
+    status: Literal["pending", "ready", "failed"]
+    chunk_count: int | None = None
+
+
 TASK_STORE: dict[str, dict[str, Any]] = {}
 # Prefer MySQL when configured; keep in-memory fallback for local demos/tests.
 USE_DB_STORE = store_available()
@@ -245,65 +270,65 @@ def update_task_progress(
     )
 
 
-def _estimate_page_range(duration_minutes: int) -> str:
-    low = max(5, duration_minutes // 2)
-    high = max(low + 2, duration_minutes)
-    return f"{low}-{high} 页"
-
-
 def build_default_clarification_questions(payload: CreateTaskRequest) -> list[dict[str, Any]]:
-    questions: list[dict[str, Any]] = []
-    questions.extend(
-        [
-            {
-                "question_id": "goal",
-                "prompt": "本次演示希望听众记住的一个核心结论是什么？",
-                "answer": None,
-            },
-            {
-                "question_id": "style",
-                "prompt": "希望表达风格偏正式汇报、课堂讲解还是路演展示？",
-                "answer": None,
-            },
-            {
-                "question_id": "depth",
-                "prompt": "内容深度偏概览、实操还是研究分析？",
-                "answer": None,
-            },
-        ]
-    )
-    if not (payload.audience or "").strip():
-        questions.append(
-            {
-                "question_id": "audience_level",
-                "prompt": "听众对该主题的熟悉程度如何（入门/中等/专业）？",
-                "answer": None,
-            }
-        )
-    if not (payload.raw_notes or "").strip():
-        questions.append(
-            {
-                "question_id": "constraints",
-                "prompt": "是否有必须包含或必须避免的内容约束？",
-                "answer": None,
-            }
-        )
-    if payload.source_type == "long_document" and not (payload.document_title or "").strip():
-        questions.append(
-            {
-                "question_id": "doc_focus",
-                "prompt": "长文档中优先提炼哪些章节或观点？",
-                "answer": None,
-            }
-        )
-    questions.append(
-        {
-            "question_id": "page_range",
-            "prompt": "期望页数范围是多少（例如 8-12 页）？",
-            "answer": _estimate_page_range(payload.duration_minutes),
-        }
-    )
-    return questions
+    return build_fallback_clarification_questions(payload)
+
+
+def _source_quality_default() -> str:
+    value = str(settings.retrieval_default_source_quality or "medium").lower()
+    return value if value in {"low", "medium", "high"} else "medium"
+
+
+def _default_retrieval_policy(task: dict[str, Any]) -> dict[str, Any]:
+    input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
+    return {
+        "retrieval_depth": str(input_payload.get("retrieval_depth") or "L1"),
+        "tavily_enabled": bool(settings.retrieval_tavily_enabled),
+        "prefer_user_doc": str(input_payload.get("source_type") or "") == "long_document",
+        "source_quality": _source_quality_default(),
+        "force_refresh": False,
+        "enable_fallback_deepen": bool(settings.retrieval_enable_fallback_deepen),
+    }
+
+
+def _policy_payload(payload: GenerateSlidesRequest | None) -> dict[str, Any]:
+    if payload is None:
+        return {}
+    values: dict[str, Any] = {}
+    # v1.0 top-level compatibility first; nested retrieval_policy wins below.
+    if payload.retrieval_depth is not None:
+        values["retrieval_depth"] = payload.retrieval_depth.value
+    if payload.tavily_enabled is not None:
+        values["tavily_enabled"] = payload.tavily_enabled
+    if payload.force_refresh:
+        values["force_refresh"] = True
+    if payload.retrieval_policy is not None:
+        for key, value in payload.retrieval_policy.model_dump(exclude_none=True).items():
+            values[key] = value.value if isinstance(value, Enum) else value
+    return values
+
+
+def merge_retrieval_policy(task: dict[str, Any], payload: GenerateSlidesRequest | None = None) -> dict[str, Any]:
+    runtime = task.get("runtime")
+    if not isinstance(runtime, dict):
+        runtime = {}
+    existing = runtime.get("retrieval_policy")
+    if not isinstance(existing, dict):
+        existing = {}
+    merged = {
+        **_default_retrieval_policy(task),
+        **{key: value for key, value in existing.items() if value is not None},
+        **_policy_payload(payload),
+    }
+    merged["retrieval_depth"] = str(merged.get("retrieval_depth") or "L1")
+    if merged["retrieval_depth"] not in {"L0", "L1", "L2"}:
+        merged["retrieval_depth"] = "L1"
+    merged["source_quality"] = str(merged.get("source_quality") or _source_quality_default()).lower()
+    if merged["source_quality"] not in {"low", "medium", "high"}:
+        merged["source_quality"] = _source_quality_default()
+    for key in ("tavily_enabled", "prefer_user_doc", "force_refresh", "enable_fallback_deepen"):
+        merged[key] = bool(merged.get(key))
+    return merged
 
 
 def persist_task(task: dict[str, Any]) -> None:
@@ -446,6 +471,16 @@ def validate_task_id(task_id: str) -> None:
 
 
 def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
+    input_payload = dict(task.get("input") if isinstance(task.get("input"), dict) else {})
+    attachments = input_payload.get("attachments")
+    if isinstance(attachments, list):
+        input_payload["attachments"] = [
+            public_attachment(item)
+            for item in attachments
+            if isinstance(item, dict)
+        ]
+    else:
+        input_payload["attachments"] = []
     # Keep v0 fields while exposing the v1 workflow fields for new clients.
     return {
         "task_id": task["task_id"],
@@ -458,6 +493,8 @@ def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
         "outline": task.get("outline"),
         "progress": task.get("progress"),
         "error": task.get("error"),
+        "input": input_payload,
+        "runtime": task.get("runtime"),
     }
 
 
@@ -514,8 +551,18 @@ def create_task(payload: CreateTaskRequest) -> CreateTaskResponse:
     task_id = str(uuid4())
     created_at = now_iso()
     input_payload = payload.model_dump()
+    input_payload["attachments"] = []
     if payload.source_type == "long_document":
         input_payload["document_profile"] = build_document_profile(payload.document_text)
+    else:
+        input_payload["document_profile"] = None
+    runtime = {
+        "workflow": None,
+        "generation_attempts": 0,
+        "last_started_at": None,
+        "last_finished_at": None,
+        "document_analysis_status": "done" if payload.source_type == "long_document" else None,
+    }
     task = {
         "task_id": task_id,
         "schema_version": settings.task_schema_version,
@@ -525,20 +572,20 @@ def create_task(payload: CreateTaskRequest) -> CreateTaskResponse:
         "input": input_payload,
         # Initialize a structured clarification template for "understand first, then generate".
         "clarification": {
-            "questions": build_default_clarification_questions(payload),
+            "questions": build_clarification_questions(
+                payload,
+                document_profile=input_payload.get("document_profile"),
+                fallback_builder=build_default_clarification_questions,
+            ),
             "submitted": False,
         },
         "outline_skeleton": None,
         "outline": None,
         "progress": build_progress("idle", "任务已创建，等待提交澄清。"),
         "error": None,
-        "runtime": {
-            "workflow": None,
-            "generation_attempts": 0,
-            "last_started_at": None,
-            "last_finished_at": None,
-        },
+        "runtime": runtime,
     }
+    task["runtime"]["retrieval_policy"] = _default_retrieval_policy(task)
     persist_task(task)
     logger.info("Task created task_id=%s status=%s", task_id, task["status"])
     return CreateTaskResponse(task_id=task_id, status=TaskStatus.clarifying, created_at=created_at)
@@ -549,6 +596,48 @@ def get_task(task_id: UUID) -> dict[str, Any]:
     task_id_str = str(task_id)
     validate_task_id(task_id_str)
     return task_snapshot(get_task_or_404(task_id_str))
+
+
+@router.post("/{task_id:uuid}/documents/upload", response_model=DocumentUploadResponse, status_code=status.HTTP_201_CREATED)
+async def upload_task_document(task_id: UUID, file: UploadFile = File(...)) -> DocumentUploadResponse:
+    task_id_str = str(task_id)
+    validate_task_id(task_id_str)
+    task = get_task_or_404(task_id_str)
+    if task["status"] == TaskStatus.generating.value:
+        raise build_error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_STATE",
+            "Cannot upload documents while generation is running.",
+            {"status": task["status"]},
+        )
+
+    content = await file.read()
+    try:
+        attachment = save_task_document(task_id_str, file.filename or "upload.txt", content)
+    except DocumentUploadError as exc:
+        raise build_error(status.HTTP_422_UNPROCESSABLE_ENTITY, exc.code, exc.message, exc.details) from exc
+    except Exception as exc:
+        logger.exception("Document upload failed task_id=%s filename=%s", task_id_str, file.filename)
+        attachment = {
+            "document_id": f"doc_failed_{uuid4().hex[:8]}",
+            "filename": file.filename or "upload.txt",
+            "status": "failed",
+            "chunk_count": None,
+            "error": str(exc),
+        }
+
+    input_payload = task.get("input")
+    if not isinstance(input_payload, dict):
+        input_payload = {}
+    attachments = input_payload.get("attachments")
+    if not isinstance(attachments, list):
+        attachments = []
+    attachments.append(attachment)
+    input_payload["attachments"] = attachments
+    task["input"] = input_payload
+    task["updated_at"] = now_iso()
+    persist_task(task)
+    return DocumentUploadResponse(**public_attachment(attachment))
 
 
 @router.get("", response_model=ListTasksResponse)
@@ -800,22 +889,19 @@ def generate_slides(task_id: UUID, payload: GenerateSlidesRequest | None = None)
     if was_failed and task.get("outline"):
         task["outline"] = None
     concurrency = payload.concurrency if payload and payload.concurrency is not None else 2
-    if payload and payload.retrieval_depth is not None:
-        generation_retrieval_depth = payload.retrieval_depth.value
-        task["input"]["retrieval_depth"] = generation_retrieval_depth
-    else:
-        generation_retrieval_depth = task["input"].get("retrieval_depth", "L1")
-    generation_tavily_enabled = payload.tavily_enabled if payload else None
-    force_refresh = bool(payload.force_refresh) if payload else False
+    retrieval_policy = merge_retrieval_policy(task, payload)
+    task["input"]["retrieval_depth"] = retrieval_policy["retrieval_depth"]
     task["runtime"] = {
         **runtime,
         "workflow": "slides",
         "last_started_at": now_iso(),
         "last_idempotency_key": idempotency_key or None,
         "concurrency": concurrency,
-        "generation_retrieval_depth": generation_retrieval_depth,
-        "generation_tavily_enabled": generation_tavily_enabled,
-        "force_refresh_retrieval": force_refresh,
+        "retrieval_policy": retrieval_policy,
+        # Compatibility for older code/tests that still inspect generation_* runtime keys.
+        "generation_retrieval_depth": retrieval_policy["retrieval_depth"],
+        "generation_tavily_enabled": retrieval_policy["tavily_enabled"],
+        "force_refresh_retrieval": retrieval_policy["force_refresh"],
     }
     update_task_progress(task, "retrieving_page", "正在准备按页生成。", current=0, total=len(skeleton), percent=0)
     task["updated_at"] = now_iso()
@@ -1227,7 +1313,8 @@ def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str
             "user_notes": user_instruction or "",
         }
 
-        retrieval_depth = task["input"].get("retrieval_depth", "L1")
+        retrieval_policy = merge_retrieval_policy(task)
+        retrieval_depth = retrieval_policy["retrieval_depth"]
         topic = task["input"]["topic"]
         clarification = task.get("clarification")
 
@@ -1240,7 +1327,16 @@ def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str
         task["updated_at"] = now_iso()
         persist_task(task)
 
-        retrieval_by_slide, _cache = retrieve_for_pages(topic, retrieval_depth, [skeleton_entry], clarification)
+        retrieval_by_slide, _cache = retrieve_for_pages(
+            topic,
+            retrieval_depth,
+            [skeleton_entry],
+            clarification,
+            tavily_enabled=bool(retrieval_policy.get("tavily_enabled")),
+            force_refresh=bool(retrieval_policy.get("force_refresh")),
+            retrieval_policy=retrieval_policy,
+            task=task,
+        )
         hits = retrieval_by_slide.get(slide_id, [])
         ev_counter = 1
         for hit in hits:
@@ -1352,6 +1448,12 @@ def regenerate_slide(task_id: UUID, slide_id: str, payload: RegenerateSlideReque
         raise build_error(status.HTTP_404_NOT_FOUND, "SLIDE_NOT_FOUND", f"Slide {slide_id} not found in outline.")
 
     user_instruction = payload.user_instruction if payload else None
+    runtime = task.get("runtime")
+    if not isinstance(runtime, dict):
+        runtime = {}
+    runtime["retrieval_policy"] = merge_retrieval_policy(task)
+    runtime["workflow"] = "regenerate_slide"
+    task["runtime"] = runtime
     task["status"] = TaskStatus.generating.value
     task["progress"] = {"phase": "regenerating_slide", "current": 1, "total": 1, "message": "正在重新生成该页...", "percent": 0}
     task["updated_at"] = now_iso()

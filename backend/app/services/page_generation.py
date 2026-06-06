@@ -12,6 +12,7 @@ from openai import OpenAI
 
 from app.config import settings
 from app.retrieval import RetrievalDepth, RetrievalRequest, get_retriever
+from app.services.task_documents import retrieve_task_document_hits
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,14 @@ def _is_low_quality_source(source_id: str) -> bool:
     if _HIGH_QUALITY_SOURCE_PATTERNS.search(source_id):
         return False
     return bool(_LOW_QUALITY_SOURCE_PATTERNS.search(source_id))
+
+
+def _is_high_quality_source(source_id: str) -> bool:
+    if not source_id:
+        return False
+    if source_id.startswith("user:"):
+        return True
+    return bool(_HIGH_QUALITY_SOURCE_PATTERNS.search(source_id))
 
 _NOISE_LINE = re.compile(r"^[\s>→/|·•\-—]+$")
 _NAV_LINE = re.compile(
@@ -109,7 +118,13 @@ class SlideWorkflowError(RuntimeError):
         self.reason = reason
 
 
-def _retrieval_cache_key(slide: dict, retrieval_depth: str, tavily_enabled: bool) -> str:
+def _retrieval_cache_key(
+    slide: dict,
+    retrieval_depth: str,
+    tavily_enabled: bool,
+    *,
+    policy_key: str = "",
+) -> str:
     return "|".join(
         [
             str(slide.get("slide_id") or ""),
@@ -118,6 +133,7 @@ def _retrieval_cache_key(slide: dict, retrieval_depth: str, tavily_enabled: bool
             str(slide.get("user_notes") or ""),
             retrieval_depth,
             "web" if tavily_enabled else "local",
+            policy_key,
         ]
     )
 
@@ -130,6 +146,57 @@ def _strip_evidence_ids(hits: list[dict]) -> list[dict]:
         entry = {k: v for k, v in hit.items() if k != "evidence_id"}
         cleaned.append(entry)
     return cleaned
+
+
+def _policy_cache_key(policy: dict[str, Any] | None) -> str:
+    if not isinstance(policy, dict):
+        return ""
+    parts = [
+        f"prefer_user_doc={bool(policy.get('prefer_user_doc'))}",
+        f"source_quality={policy.get('source_quality') or 'medium'}",
+        f"fallback={bool(policy.get('enable_fallback_deepen'))}",
+    ]
+    return ";".join(parts)
+
+
+def _filter_hits_by_quality(hits: list[dict], source_quality: str) -> list[dict]:
+    quality = source_quality if source_quality in {"low", "medium", "high"} else "medium"
+    if quality == "low":
+        return hits
+    selected: list[dict] = []
+    deprioritized: list[dict] = []
+    for hit in hits:
+        source = str(hit.get("source_id") or "").lower()
+        if source.startswith("user:"):
+            selected.append(hit)
+        elif quality == "high":
+            if _is_high_quality_source(source):
+                selected.append(hit)
+            else:
+                deprioritized.append(hit)
+        elif _is_low_quality_source(source):
+            deprioritized.append(hit)
+        else:
+            selected.append(hit)
+    if quality == "high":
+        return selected
+    if len(selected) < 2:
+        selected.extend(deprioritized)
+    return selected
+
+
+def _merge_preferred_hits(primary: list[dict], secondary: list[dict], limit: int = 3) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for hit in primary + secondary:
+        key = f"{hit.get('source_id')}|{str(hit.get('snippet') or '')[:80]}"
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(hit)
+        if len(merged) >= limit:
+            break
+    return merged
 
 
 def _classify_retrieval_exception(exc: Exception, slide_id: str) -> SlideWorkflowError:
@@ -246,34 +313,51 @@ def retrieve_for_pages(
     tavily_enabled: bool | None = None,
     slide_cache: dict[str, list[dict]] | None = None,
     force_refresh: bool = False,
+    retrieval_policy: dict[str, Any] | None = None,
+    task: dict[str, Any] | None = None,
 ) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
     """Retrieve evidence for all pages; reuse slide_cache when skeleton slice keys match."""
     use_tavily = settings.retrieval_tavily_enabled if tavily_enabled is None else tavily_enabled
+    policy_cache_key = _policy_cache_key(retrieval_policy)
     cache: dict[str, list[dict]] = dict(slide_cache or {})
     by_slide: dict[str, list[dict]] = {}
     slides_to_fetch: list[dict] = []
 
     for slide in skeleton:
         slide_id = str(slide.get("slide_id") or "")
-        cache_key = _retrieval_cache_key(slide, retrieval_depth, use_tavily)
+        cache_key = _retrieval_cache_key(slide, retrieval_depth, use_tavily, policy_key=policy_cache_key)
         if not force_refresh and cache_key in cache:
             by_slide[slide_id] = [dict(hit) for hit in cache[cache_key]]
         else:
             slides_to_fetch.append(slide)
 
     if slides_to_fetch:
-        fetched = _retrieve_for_pages_uncached(
-            topic,
-            retrieval_depth,
-            slides_to_fetch,
-            clarification,
-            tavily_enabled=use_tavily,
-        )
+        try:
+            fetched = _retrieve_for_pages_uncached(
+                topic,
+                retrieval_depth,
+                slides_to_fetch,
+                clarification,
+                tavily_enabled=use_tavily,
+                retrieval_policy=retrieval_policy,
+                task=task,
+            )
+        except TypeError as exc:
+            if "unexpected keyword" not in str(exc):
+                raise
+            # Tests and older callers may monkeypatch the uncached helper with the v1.0 signature.
+            fetched = _retrieve_for_pages_uncached(
+                topic,
+                retrieval_depth,
+                slides_to_fetch,
+                clarification,
+                tavily_enabled=use_tavily,
+            )
         for slide in slides_to_fetch:
             slide_id = str(slide.get("slide_id") or "")
             hits = fetched.get(slide_id, [])
             by_slide[slide_id] = hits
-            cache_key = _retrieval_cache_key(slide, retrieval_depth, use_tavily)
+            cache_key = _retrieval_cache_key(slide, retrieval_depth, use_tavily, policy_key=policy_cache_key)
             cache[cache_key] = _strip_evidence_ids(hits)
 
     return by_slide, cache
@@ -286,6 +370,8 @@ def _retrieve_for_pages_uncached(
     clarification: dict | None,
     *,
     tavily_enabled: bool,
+    retrieval_policy: dict[str, Any] | None = None,
+    task: dict[str, Any] | None = None,
 ) -> dict[str, list[dict]]:
     """Retrieve evidence for pages without reading the per-task cache."""
     retriever = get_retriever(
@@ -295,6 +381,10 @@ def _retrieve_for_pages_uncached(
     )
     clarification_text = _clarification_text(clarification)
     depth = RetrievalDepth(retrieval_depth)
+    source_quality = str((retrieval_policy or {}).get("source_quality") or settings.retrieval_default_source_quality)
+    prefer_user_doc = bool((retrieval_policy or {}).get("prefer_user_doc"))
+    fallback_deepen = bool((retrieval_policy or {}).get("enable_fallback_deepen"))
+    task_id = str((task or {}).get("task_id") or "")
     tavily_max = settings.retrieval_tavily_max_pages if tavily_enabled else 0
     tavily_used = 0
 
@@ -317,25 +407,26 @@ def _retrieve_for_pages_uncached(
                     if use_web and tavily_max > 0:
                         tavily_used += 1
                 local_depth = depth if use_web else RetrievalDepth("L0")
+                user_hits: list[dict] = []
+                if prefer_user_doc and task_id:
+                    user_hits = await retrieve_task_document_hits(
+                        task_id=task_id,
+                        query=query,
+                        depth=RetrievalDepth("L0"),
+                        max_results=3,
+                    )
                 result = await retriever.retrieve(RetrievalRequest(query=query, depth=local_depth))
-                # R3: 来源质量分级过滤——优先高质量来源，降权聚合/营销页
-                selected: list[dict] = []
-                deprioritized: list[dict] = []
-                for hit in result.hits:
-                    hit_dict = hit.model_dump()
-                    source = str(hit_dict.get("source_id") or "").lower()
-                    if _is_low_quality_source(source):
-                        deprioritized.append(hit_dict)
-                    else:
-                        selected.append(hit_dict)
-                    if len(selected) >= 3:
-                        break
-                # 若高质量来源不足 2 条，用降权来源补充
-                if len(selected) < 2:
-                    for hit_dict in deprioritized:
-                        selected.append(hit_dict)
-                        if len(selected) >= 3:
-                            break
+                global_hits = [hit.model_dump() for hit in result.hits]
+                filtered_global = _filter_hits_by_quality(global_hits, source_quality)
+                selected = _merge_preferred_hits(user_hits, filtered_global, limit=3)
+                if (
+                    len(selected) < settings.retrieval_min_evidence_per_slide
+                    and fallback_deepen
+                    and local_depth != RetrievalDepth.L2
+                ):
+                    deeper = await retriever.retrieve(RetrievalRequest(query=query, depth=RetrievalDepth.L2))
+                    deeper_hits = _filter_hits_by_quality([hit.model_dump() for hit in deeper.hits], source_quality)
+                    selected = _merge_preferred_hits(selected, deeper_hits, limit=3)
                 return slide_id, selected[:3]
             except Exception as exc:
                 raise _classify_retrieval_exception(exc, slide_id) from exc
@@ -685,13 +776,22 @@ def generate_pages_from_skeleton(
     runtime = task.get("runtime", {})
     if not isinstance(runtime, dict):
         runtime = {}
-    retrieval_depth = str(runtime.get("generation_retrieval_depth") or input_data.get("retrieval_depth", "L1"))
-    tavily_enabled = runtime.get("generation_tavily_enabled")
+    retrieval_policy = runtime.get("retrieval_policy")
+    if not isinstance(retrieval_policy, dict):
+        retrieval_policy = {}
+    retrieval_depth = str(
+        retrieval_policy.get("retrieval_depth")
+        or runtime.get("generation_retrieval_depth")
+        or input_data.get("retrieval_depth", "L1")
+    )
+    tavily_enabled = retrieval_policy.get("tavily_enabled")
+    if tavily_enabled is None:
+        tavily_enabled = runtime.get("generation_tavily_enabled")
     if tavily_enabled is not None:
         use_tavily = bool(tavily_enabled)
     else:
         use_tavily = settings.retrieval_tavily_enabled
-    force_refresh = bool(runtime.get("force_refresh_retrieval"))
+    force_refresh = bool(retrieval_policy.get("force_refresh", runtime.get("force_refresh_retrieval")))
     slide_cache = runtime.get("retrieval_cache")
     if not isinstance(slide_cache, dict):
         slide_cache = {}
@@ -763,6 +863,8 @@ def generate_pages_from_skeleton(
         tavily_enabled=use_tavily,
         slide_cache=slide_cache,
         force_refresh=force_refresh,
+        retrieval_policy=retrieval_policy,
+        task=task,
     )
     runtime["retrieval_cache"] = slide_cache
     task["runtime"] = runtime
@@ -788,6 +890,7 @@ def generate_pages_from_skeleton(
             "model": settings.llm_model,
             "schema_version": settings.outline_schema_version,
             "retrieval_enabled": True,
+            "retrieval_policy": retrieval_policy,
             "partial": True,
             "completed_pages": 0,
             "failed_pages": 0,
@@ -882,6 +985,7 @@ def generate_pages_from_skeleton(
     outline["meta"]["completed_pages"] = completed_pages
     outline["meta"]["failed_pages"] = failed_pages
     outline["meta"]["total_pages"] = total
+    outline["meta"]["retrieval_policy"] = retrieval_policy
     task["outline"] = outline
 
     # Phase 4: saving

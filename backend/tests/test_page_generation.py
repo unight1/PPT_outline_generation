@@ -9,6 +9,7 @@ from app.services.page_generation import (
     _build_page_prompt,
     _build_page_query,
     _clarification_text,
+    _filter_hits_by_quality,
     clean_evidence_snippet,
     match_bullets_to_evidence,
     merge_pages_to_outline,
@@ -148,6 +149,21 @@ def test_build_page_query_skips_empty_fields() -> None:
     query = _build_page_query("主题", slide, "")
     assert "页面目标" not in query
     assert "本页意图" not in query
+
+
+def test_filter_hits_by_source_quality_keeps_user_docs_first() -> None:
+    hits = [
+        {"snippet": "用户附件", "source_id": "user:notes.txt"},
+        {"snippet": "营销页", "source_id": "https://promo.example.com"},
+        {"snippet": "论文", "source_id": "https://arxiv.org/abs/123"},
+    ]
+
+    medium = _filter_hits_by_quality(hits, "medium")
+    assert medium[0]["source_id"] == "user:notes.txt"
+    assert all("promo" not in hit["source_id"] for hit in medium)
+
+    high = _filter_hits_by_quality(hits, "high")
+    assert [hit["source_id"] for hit in high] == ["user:notes.txt", "https://arxiv.org/abs/123"]
 
 
 # ── _build_page_prompt ──────────────────────────────────────

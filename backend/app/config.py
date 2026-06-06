@@ -37,8 +37,8 @@ class Settings(BaseSettings):
     generation_hard_timeout_seconds: int = 3600
     # Load embedding/reranker singleton in a background thread so downloads run outside generate().
     retrieval_warmup_on_startup: bool = True
-    task_schema_version: str = "v1.0.0"
-    outline_schema_version: str = "v1.0.0"
+    task_schema_version: str = "v1.1.0"
+    outline_schema_version: str = "v1.1.0"
     retrieval_min_evidence_per_slide: int = 1
     retrieval_min_quality_score: float = 0.45
     # A1: default off — secondary depth expansion adds latency and is rarely needed.
@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     retrieval_tavily_enabled: bool = True
     # A1: limit Tavily calls per generate run; 0 = unlimited (not recommended).
     retrieval_tavily_max_pages: int = 2
+    retrieval_default_source_quality: str = "medium"
+    task_documents_dir: str = "./task_documents"
+    task_documents_chroma_dir: str = "./task_chroma_data"
+    task_document_upload_max_bytes: int = 2_000_000
 
 
 settings = Settings()
