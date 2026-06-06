@@ -71,6 +71,21 @@ def test_clarification_questions_are_trimmed_when_context_is_complete() -> None:
     assert "goal" in ids and "style" in ids and "depth" in ids
 
 
+def test_clarification_questions_follow_text_only_contract() -> None:
+    client = TestClient(app)
+    resp = client.post(
+        "/api/tasks",
+        json={"topic": "智慧医疗", "retrieval_depth": "L1"},
+    )
+    assert resp.status_code == 201
+    task = client.get(f"/api/tasks/{resp.json()['task_id']}").json()
+    questions = task["clarification"]["questions"]
+    assert 3 <= len(questions) <= 6
+    for question in questions:
+        assert set(question) == {"question_id", "prompt", "answer"}
+        assert "智慧医疗" in question["prompt"] or question["question_id"] != "goal"
+
+
 def test_generate_requires_submitted_clarification() -> None:
     client = TestClient(app)
     create = client.post("/api/tasks", json={"topic": "AI PPT", "retrieval_depth": "L1"}).json()
@@ -171,6 +186,49 @@ def test_generate_skeleton_requires_submitted_clarification() -> None:
     resp = client.post(f"/api/tasks/{task_id}/skeleton/generate", json={})
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "INVALID_STATE"
+
+
+def test_generate_slides_merges_and_persists_retrieval_policy() -> None:
+    client = TestClient(app)
+    create = client.post("/api/tasks", json={"topic": "AI PPT", "retrieval_depth": "L0"}).json()
+    task_id = create["task_id"]
+    task = tasks_route.TASK_STORE[task_id]
+    task["status"] = "pending"
+    task["clarification"]["submitted"] = True
+    task["outline_skeleton"] = [{"slide_id": "s1", "title": "页1", "intent": "", "user_notes": ""}]
+
+    old_enqueue = tasks_route.enqueue_slides_generation
+    called: list[tuple[str, int]] = []
+    tasks_route.enqueue_slides_generation = lambda tid, concurrency: called.append((tid, concurrency)) or _done_future()  # type: ignore[assignment]
+    try:
+        resp = client.post(
+            f"/api/tasks/{task_id}/slides/generate",
+            json={
+                "retrieval_depth": "L1",
+                "retrieval_policy": {
+                    "retrieval_depth": "L2",
+                    "tavily_enabled": False,
+                    "prefer_user_doc": True,
+                    "source_quality": "high",
+                    "force_refresh": True,
+                    "enable_fallback_deepen": True,
+                },
+            },
+        )
+    finally:
+        tasks_route.enqueue_slides_generation = old_enqueue
+
+    assert resp.status_code == 202
+    assert called == [(task_id, 2)]
+    runtime = tasks_route.TASK_STORE[task_id]["runtime"]
+    policy = runtime["retrieval_policy"]
+    assert policy["retrieval_depth"] == "L2"
+    assert policy["tavily_enabled"] is False
+    assert policy["prefer_user_doc"] is True
+    assert policy["source_quality"] == "high"
+    assert policy["force_refresh"] is True
+    assert policy["enable_fallback_deepen"] is True
+    assert tasks_route.TASK_STORE[task_id]["input"]["retrieval_depth"] == "L2"
 
 
 def test_patch_skeleton_after_failed_resets_to_pending() -> None:
@@ -400,6 +458,52 @@ def test_long_document_builds_internal_document_profile() -> None:
     assert profile.get("segment_count", 0) > 0
     assert isinstance(profile.get("key_points"), list)
     assert isinstance(profile.get("keywords"), list)
+
+
+def test_upload_task_document_updates_attachments(tmp_path) -> None:
+    old_docs_dir = settings.task_documents_dir
+    old_chroma_dir = settings.task_documents_chroma_dir
+    settings.task_documents_dir = str(tmp_path / "docs")
+    settings.task_documents_chroma_dir = str(tmp_path / "chroma")
+    try:
+        client = TestClient(app)
+        create = client.post("/api/tasks", json={"topic": "附件测试", "retrieval_depth": "L1"}).json()
+        task_id = create["task_id"]
+        resp = client.post(
+            f"/api/tasks/{task_id}/documents/upload",
+            files={"file": ("notes.txt", "专有名词 AlphaBetaX 只能来自附件。", "text/plain")},
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["filename"] == "notes.txt"
+        assert body["status"] == "ready"
+        assert body["chunk_count"] >= 1
+
+        task = client.get(f"/api/tasks/{task_id}").json()
+        attachments = task["input"]["attachments"]
+        assert len(attachments) == 1
+        assert attachments[0]["document_id"] == body["document_id"]
+        assert "stored_filename" not in attachments[0]
+    finally:
+        settings.task_documents_dir = old_docs_dir
+        settings.task_documents_chroma_dir = old_chroma_dir
+
+
+def test_upload_rejects_unsupported_document_type(tmp_path) -> None:
+    old_docs_dir = settings.task_documents_dir
+    settings.task_documents_dir = str(tmp_path / "docs")
+    try:
+        client = TestClient(app)
+        create = client.post("/api/tasks", json={"topic": "附件测试", "retrieval_depth": "L1"}).json()
+        task_id = create["task_id"]
+        resp = client.post(
+            f"/api/tasks/{task_id}/documents/upload",
+            files={"file": ("notes.exe", b"bad", "application/octet-stream")},
+        )
+        assert resp.status_code == 422
+        assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+    finally:
+        settings.task_documents_dir = old_docs_dir
 
 
 def test_task_not_found_returns_contract_error() -> None:
