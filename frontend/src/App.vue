@@ -11,13 +11,14 @@ import {
   NInputNumber,
   NMessageProvider,
   NModal,
-  NProgress,
   NSelect,
   NSpace,
   NSteps,
   NStep,
   NTag,
   NText,
+  NCollapse,
+  NCollapseItem,
 } from 'naive-ui'
 import type {
   CreateTaskRequest,
@@ -535,7 +536,7 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
 
         <div class="app-body">
           <!-- Form -->
-          <n-card v-if="view === 'form'" title="基本信息" size="small" class="view-card">
+          <n-card v-if="view === 'form'" title="创建演示任务" size="small" class="view-card">
             <n-grid :cols="2" :x-gap="16" :y-gap="0">
               <n-gi :span="2">
                 <span class="label-text">PPT 主题 *</span>
@@ -580,7 +581,11 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
                   <span class="label-text">文档正文 *</span>
                   <n-input v-model:value="form.document_text" type="textarea" :rows="5"
                     placeholder="请粘贴长文档正文，后端将用于提炼重点与生成大纲" />
-                </n-gi>
+                
+                  <n-text depth="3" class="field-hint">
+                     当前正文约 {{ form.document_text?.length ?? 0 }} 字
+                  </n-text>
+                  </n-gi> 
               </n-grid>
             </template>
           </n-card>
@@ -592,18 +597,27 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
               <div v-if="task.clarification">
                 <n-grid :cols="1" :y-gap="8">
                   <n-gi v-for="q in task.clarification.questions" :key="q.question_id">
-                    <n-text depth="2">{{ q.prompt }}</n-text>
-                    <n-input v-model:value="answers[q.question_id!]" type="textarea" :rows="2" />
+                    <n-space vertical :size="6">
+                      <n-space align="center" :size="8">
+                        <n-text strong>{{ q.prompt }}</n-text>
+                        <n-tag v-if="q.answer" type="success" size="small">
+                          已预填
+                        </n-tag>
+                      </n-space>
+
+                      <n-text v-if="q.answer" depth="3" class="field-hint">
+                        建议答案：{{ q.answer }}
+                      </n-text>
+
+                      <n-input
+                        v-model:value="answers[q.question_id!]"
+                        type="textarea"
+                        :rows="2"
+                        placeholder="请根据你的演示目标补充或修改答案"
+                      />
+                    </n-space>
                   </n-gi>
                 </n-grid>
-              </div>
-              <div v-if="task.status === 'generating'">
-                <n-text depth="3">{{ task.progress?.message || '处理中…' }}</n-text>
-                <n-progress v-if="typeof task.progress?.percent === 'number'"
-                  type="line" :percentage="task.progress!.percent!" :height="8" style="margin-top:8px" />
-              </div>
-              <div v-if="task.status === 'failed'" class="error-box">
-                <n-text type="error">任务失败：{{ taskErrorLabel }} — {{ task.error?.message }}</n-text>
               </div>
             </n-space>
           </n-card>
@@ -635,32 +649,53 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
                     </n-card>
                   </n-gi>
                 </n-grid>
-                <n-card size="small" title="生成参数" style="margin-top:12px">
-                  <n-grid :cols="4" :x-gap="12">
-                    <n-gi>
-                      <span class="label-text">检索深度</span>
-                      <n-select v-model:value="slideGenOptions.retrieval_depth" size="small" :options="[
-                        { label: 'L0：轻量', value: 'L0' },
-                        { label: 'L1：平衡', value: 'L1' },
-                        { label: 'L2：深度', value: 'L2' },
-                      ]" />
-                    </n-gi>
-                    <n-gi>
-                      <span class="label-text">并发数</span>
-                      <n-select v-model:value="slideGenOptions.concurrency" size="small" :options="[
-                        { label: '1（最稳）', value: 1 },
-                        { label: '2（推荐）', value: 2 },
-                        { label: '3（最快）', value: 3 },
-                      ]" />
-                    </n-gi>
-                    <n-gi style="display:flex;align-items:flex-end">
-                      <n-checkbox v-model:checked="slideGenOptions.tavily_enabled"> 联网</n-checkbox>
-                    </n-gi>
-                    <n-gi style="display:flex;align-items:flex-end">
-                      <n-checkbox v-model:checked="slideGenOptions.force_refresh"> 强制刷新</n-checkbox>
-                    </n-gi>
-                  </n-grid>
-                </n-card>
+                <n-collapse style="margin-top:12px">
+                  <n-collapse-item title="高级选项（按页生成参数）" name="generation-options">
+                    <n-grid :cols="4" :x-gap="12" :y-gap="12">
+                      <n-gi>
+                        <span class="label-text">检索深度</span>
+                        <n-select
+                         v-model:value="slideGenOptions.retrieval_depth"
+                          size="small"
+                          :options="[
+                            { label: '资料少查（速度优先）', value: 'L0' },
+                            { label: '平衡模式（推荐）', value: 'L1' },
+                            { label: '多查引用（资料更充分）', value: 'L2' },
+                          ]"
+                        />
+                      </n-gi>
+
+                      <n-gi>
+                        <span class="label-text">并发数</span>
+                        <n-select
+                         v-model:value="slideGenOptions.concurrency"
+                         size="small"
+                          :options="[
+                            { label: '1（最稳）', value: 1 },
+                            { label: '2（推荐）', value: 2 },
+                            { label: '3（最快）', value: 3 },
+                         ]"
+                       />
+                      </n-gi>
+
+                     <n-gi style="display:flex;align-items:flex-end">
+                       <n-checkbox v-model:checked="slideGenOptions.tavily_enabled">
+                         联网检索
+                        </n-checkbox>
+                       </n-gi>
+
+                      <n-gi style="display:flex;align-items:flex-end">
+                       <n-checkbox v-model:checked="slideGenOptions.force_refresh">
+                         强制刷新
+                        </n-checkbox>
+                       </n-gi>
+                      </n-grid>
+
+                      <n-text depth="3" class="field-hint">
+                        这些选项会影响按页生成阶段；当前可先用于 Mock / 本地状态，真实 retrieval policy 由后续对接接入。
+                      </n-text>
+                    </n-collapse-item>
+                    </n-collapse>
               </div>
               <div v-if="task.status === 'failed'" class="error-box">
                 <n-text type="error">{{ taskErrorLabel }} — {{ task.error?.message }}</n-text>
