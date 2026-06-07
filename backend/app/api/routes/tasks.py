@@ -18,6 +18,7 @@ from app.task_store import list_tasks_by_status as db_list_tasks_by_status
 from app.task_store import save_task as db_save_task
 from app.task_store import store_available
 from app.services.clarification import build_clarification_questions, build_fallback_clarification_questions
+from app.services.document_llm import enrich_document_profile, merge_enrichment_into_profile
 from app.services.document_processing import build_document_profile
 from app.services.generation import should_force_fail
 from app.services.orchestration import generate_outline_with_research
@@ -338,6 +339,49 @@ def persist_task(task: dict[str, Any]) -> None:
     TASK_STORE[task["task_id"]] = task
 
 
+def _enrich_document_profile_background(task_id: str) -> None:
+    try:
+        task = fetch_task(task_id)
+        if task is None:
+            return
+        input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
+        document_text = str(input_data.get("document_text") or "")
+        if not document_text.strip():
+            runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
+            runtime["document_analysis_status"] = "done"
+            task["runtime"] = runtime
+            task["updated_at"] = now_iso()
+            persist_task(task)
+            return
+
+        topic = str(input_data.get("topic") or "")
+        document_title = str(input_data.get("document_title") or "")
+        enrichment = enrich_document_profile(
+            document_text=document_text,
+            topic=topic,
+            document_title=document_title,
+        )
+        rule_profile = input_data.get("document_profile")
+        merged = merge_enrichment_into_profile(rule_profile, enrichment)
+        input_data["document_profile"] = merged
+        task["input"] = input_data
+        runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
+        runtime["document_analysis_status"] = "done"
+        task["runtime"] = runtime
+        task["updated_at"] = now_iso()
+        persist_task(task)
+        logger.info("Document profile enriched task_id=%s", task_id)
+    except Exception as exc:
+        logger.exception("Document profile enrichment failed task_id=%s", task_id)
+        task = fetch_task(task_id)
+        if task is not None:
+            runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
+            runtime["document_analysis_status"] = "failed"
+            task["runtime"] = runtime
+            task["updated_at"] = now_iso()
+            persist_task(task)
+
+
 def fetch_task(task_id: str) -> dict[str, Any] | None:
     if USE_DB_STORE:
         return db_get_task(task_id)
@@ -490,6 +534,7 @@ def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
         "updated_at": task["updated_at"],
         "clarification": task["clarification"],
         "outline_skeleton": task.get("outline_skeleton"),
+        "outline_skeleton_chapters": task.get("outline_skeleton_chapters"),
         "outline": task.get("outline"),
         "progress": task.get("progress"),
         "error": task.get("error"),
@@ -556,12 +601,20 @@ def create_task(payload: CreateTaskRequest) -> CreateTaskResponse:
         input_payload["document_profile"] = build_document_profile(payload.document_text)
     else:
         input_payload["document_profile"] = None
+
+    doc_analysis_status = None
+    if payload.source_type == "long_document" and (payload.document_text or "").strip():
+        if settings.use_real_llm and settings.openai_api_key:
+            doc_analysis_status = "running"
+        else:
+            doc_analysis_status = "done"
+
     runtime = {
         "workflow": None,
         "generation_attempts": 0,
         "last_started_at": None,
         "last_finished_at": None,
-        "document_analysis_status": "done" if payload.source_type == "long_document" else None,
+        "document_analysis_status": doc_analysis_status,
     }
     task = {
         "task_id": task_id,
@@ -588,6 +641,10 @@ def create_task(payload: CreateTaskRequest) -> CreateTaskResponse:
     task["runtime"]["retrieval_policy"] = _default_retrieval_policy(task)
     persist_task(task)
     logger.info("Task created task_id=%s status=%s", task_id, task["status"])
+
+    if doc_analysis_status == "running":
+        GENERATION_EXECUTOR.submit(_enrich_document_profile_background, task_id)
+
     return CreateTaskResponse(task_id=task_id, status=TaskStatus.clarifying, created_at=created_at)
 
 
@@ -953,13 +1010,16 @@ def complete_skeleton_generation(task_id: str) -> None:
             raise RuntimeError("Skeleton generation failed by test marker.")
 
         skeleton = generate_outline_skeleton(task)
-        task["outline_skeleton"] = skeleton
+        slides = skeleton["slides"] if isinstance(skeleton, dict) else skeleton
+        chapters = skeleton.get("chapters", []) if isinstance(skeleton, dict) else []
+        task["outline_skeleton"] = slides
+        task["outline_skeleton_chapters"] = chapters
         task["status"] = TaskStatus.pending.value
         update_task_progress(
             task,
             "skeleton_ready",
             "骨架已生成，请确认每页主题。",
-            total=len(skeleton),
+            total=len(slides),
             percent=None,
         )
         task["error"] = None

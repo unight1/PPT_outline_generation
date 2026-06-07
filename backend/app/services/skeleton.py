@@ -57,7 +57,7 @@ def clarification_summary(clarification: dict[str, Any] | None) -> str:
     return "\n".join(lines)
 
 
-def _build_stub_skeleton(topic: str, pages: int) -> list[dict[str, Any]]:
+def _build_stub_skeleton(topic: str, pages: int) -> dict[str, Any]:
     base = [
         ("问题背景与目标", "说明为什么要关注该主题，以及本次演示希望达成的目标"),
         ("现状分析与核心挑战", "梳理当前状态、主要矛盾和需要解决的问题"),
@@ -82,9 +82,48 @@ def _build_stub_skeleton(topic: str, pages: int) -> list[dict[str, Any]]:
                 "title": f"{title}：{topic}" if idx == 0 else title,
                 "intent": intent,
                 "user_notes": None,
+                "chapter_id": None,
             }
         )
-    return slides
+
+    chapters = _build_stub_chapters(slides)
+
+    return {"slides": slides, "chapters": chapters}
+
+
+def _build_stub_chapters(slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not slides:
+        return []
+
+    chapter_defs = [
+        ("背景与目标", "问题背景、目标设定", 2),
+        ("现状与分析", "现状梳理、挑战分析", 2),
+        ("方案与路径", "解决思路、实施路径", 2),
+        ("总结与展望", "结论、风险、行动建议", 2),
+    ]
+
+    chapters: list[dict[str, Any]] = []
+    slide_idx = 0
+    ch_num = 1
+    for title, intent_hint, default_size in chapter_defs:
+        if slide_idx >= len(slides):
+            break
+        remaining = len(slides) - slide_idx
+        size = min(default_size, remaining)
+        if ch_num == len(chapter_defs) or remaining <= size + 1:
+            size = remaining
+        chapter_slides = slides[slide_idx : slide_idx + size]
+        chapter = {
+            "chapter_id": f"ch{ch_num}",
+            "title": title,
+            "slide_ids": [str(s["slide_id"]) for s in chapter_slides],
+        }
+        for s in chapter_slides:
+            s["chapter_id"] = chapter["chapter_id"]
+        chapters.append(chapter)
+        slide_idx += size
+        ch_num += 1
+    return chapters
 
 
 def _skeleton_prompt(task: dict[str, Any], topic: str, pages: int) -> str:
@@ -102,10 +141,17 @@ def _skeleton_prompt(task: dict[str, Any], topic: str, pages: int) -> str:
         keywords = doc_profile.get("keywords", [])
         doc_summary = f"\n长文档要点：{key_points}\n关键词：{keywords}"
 
-    return f"""你是资深 PPT 策划顾问。请根据用户需求生成可编辑的页级骨架，不要生成每页正文要点。
+    return f"""你是资深 PPT 策划顾问。请根据用户需求生成可编辑的页级骨架和章节结构，不要生成每页正文要点。
 
 只输出一个 JSON 对象，结构必须如下：
 {{
+  "chapters": [
+    {{
+      "chapter_id": "ch1",
+      "title": "章节标题（如：背景分析）",
+      "slide_ids": ["s1", "s2"]
+    }}
+  ],
   "slides": [
     {{
       "slide_id": "s1",
@@ -119,10 +165,12 @@ def _skeleton_prompt(task: dict[str, Any], topic: str, pages: int) -> str:
 硬性要求：
 1) slides 必须正好 {pages} 页；
 2) slide_id 必须依次为 s1, s2, ...；
-3) title 要具体、有信息量，不要只写“背景/方案/总结”；
-4) intent 应说明该页在整套 PPT 中的作用；
-5) user_notes 只放后续生成需要注意的约束，没有则输出空字符串；
-6) 不要输出 bullets、speaker_notes、evidence 或 Markdown。
+3) chapters 必须至少 2 个，至多 5 个；每个 slide 必须且仅属于一个 chapter；
+4) slide_ids 中的 id 必须与 slides 中实际存在的 slide_id 完全一致；
+5) title 要具体、有信息量，不要只写"背景/方案/总结"；
+6) intent 应说明该页在整套 PPT 中的作用；
+7) user_notes 只放后续生成需要注意的约束，没有则输出空字符串；
+8) 不要输出 bullets、speaker_notes、evidence 或 Markdown。
 
 用户主题：{topic}
 听众/场景：{audience}
@@ -158,16 +206,20 @@ def _extract_json_object(content: str) -> dict[str, Any]:
     raise RuntimeError("LLM skeleton output is not a JSON object.")
 
 
-def _normalize_skeleton(raw: dict[str, Any], topic: str, pages: int) -> list[dict[str, Any]]:
+def _normalize_skeleton(raw: dict[str, Any], topic: str, pages: int) -> dict[str, Any]:
     slides_in = raw.get("slides", []) if isinstance(raw.get("slides", []), list) else []
+    chapters_in = raw.get("chapters", []) if isinstance(raw.get("chapters", []), list) else []
     fallback = _build_stub_skeleton(topic, pages)
+    fallback_slides = fallback["slides"] if isinstance(fallback, dict) else []
+    fallback_chapters = fallback.get("chapters", []) if isinstance(fallback, dict) else []
+
     slides: list[dict[str, Any]] = []
     for idx, slide in enumerate(slides_in[:pages], start=1):
         if not isinstance(slide, dict):
             continue
-        fallback_slide = fallback[idx - 1]
-        title = str(slide.get("title") or fallback_slide["title"]).strip() or fallback_slide["title"]
-        intent = str(slide.get("intent") or fallback_slide["intent"]).strip() or fallback_slide["intent"]
+        fb_slide = fallback_slides[idx - 1] if idx - 1 < len(fallback_slides) else {}
+        title = str(slide.get("title") or fb_slide.get("title", "")).strip() or fb_slide.get("title", "")
+        intent = str(slide.get("intent") or fb_slide.get("intent", "")).strip() or fb_slide.get("intent", "")
         raw_notes = slide.get("user_notes")
         user_notes = "" if raw_notes is None else str(raw_notes).strip()
         slides.append(
@@ -176,21 +228,57 @@ def _normalize_skeleton(raw: dict[str, Any], topic: str, pages: int) -> list[dic
                 "title": title,
                 "intent": intent,
                 "user_notes": user_notes,
+                "chapter_id": None,
             }
         )
 
     while len(slides) < pages:
-        fallback_slide = fallback[len(slides)]
+        fb_slide = fallback_slides[len(slides)] if len(slides) < len(fallback_slides) else {"title": f"补充专题 {len(slides)+1}", "intent": ""}
         slides.append(
             {
-                **fallback_slide,
-                "user_notes": fallback_slide.get("user_notes") or "",
+                "slide_id": f"s{len(slides)+1}",
+                "title": str(fb_slide.get("title", "")),
+                "intent": str(fb_slide.get("intent", "")),
+                "user_notes": fb_slide.get("user_notes") or "",
+                "chapter_id": None,
             }
         )
-    return slides
+
+    slide_id_set = {s["slide_id"] for s in slides}
+
+    if chapters_in:
+        valid_chapters: list[dict[str, Any]] = []
+        seen_ch_ids: set[str] = set()
+        for ch in chapters_in:
+            if not isinstance(ch, dict):
+                continue
+            ch_id = str(ch.get("chapter_id") or "")
+            if not ch_id or ch_id in seen_ch_ids:
+                continue
+            ch_slide_ids = [
+                str(sid) for sid in (ch.get("slide_ids") or [])
+                if str(sid) in slide_id_set
+            ]
+            if not ch_slide_ids:
+                continue
+            seen_ch_ids.add(ch_id)
+            ch_title = str(ch.get("title") or "").strip() or ch_id
+            valid_chapters.append({
+                "chapter_id": ch_id,
+                "title": ch_title,
+                "slide_ids": ch_slide_ids,
+            })
+            for s in slides:
+                if s["slide_id"] in ch_slide_ids:
+                    s["chapter_id"] = ch_id
+        if valid_chapters:
+            return {"slides": slides, "chapters": valid_chapters}
+
+    result = _build_stub_chapters(slides)
+    return {"slides": slides, "chapters": result}
 
 
-def _build_real_skeleton(task: dict[str, Any], topic: str, pages: int) -> list[dict[str, Any]]:
+def _build_real_skeleton(task: dict[str, Any], topic: str, pages: int) -> dict[str, Any]:
     if not settings.openai_api_key:
         return _build_stub_skeleton(topic, pages)
 
@@ -216,8 +304,9 @@ def _build_real_skeleton(task: dict[str, Any], topic: str, pages: int) -> list[d
     return _normalize_skeleton(raw, topic, pages)
 
 
-def generate_outline_skeleton(task: dict[str, Any]) -> list[dict[str, Any]]:
-    """Generate a page-level skeleton with LLM when configured, ready for user editing."""
+def generate_outline_skeleton(task: dict[str, Any]) -> dict[str, Any]:
+    """Generate a page-level skeleton with LLM when configured, ready for user editing.
+    Returns dict with 'slides' and 'chapters' keys."""
 
     input_payload = task.get("input", {}) if isinstance(task.get("input"), dict) else {}
     topic = str(input_payload.get("topic") or "演示主题").strip() or "演示主题"

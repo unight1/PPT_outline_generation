@@ -257,7 +257,7 @@ def _classify_llm_exception(exc: Exception, slide_id: str) -> SlideWorkflowError
     )
 
 
-def _build_page_query(topic: str, slide: dict, clarification_text: str) -> str:
+def _build_page_query(topic: str, slide: dict, clarification_text: str, *, document_profile: dict[str, Any] | None = None) -> str:
     parts = [topic]
     title = str(slide.get("title") or "")
     if title:
@@ -270,6 +270,14 @@ def _build_page_query(topic: str, slide: dict, clarification_text: str) -> str:
         parts.append(f"用户备注：{notes}")
     if clarification_text:
         parts.append(f"补充约束：{clarification_text}")
+
+    if document_profile and isinstance(document_profile, dict):
+        doc_summary = str(document_profile.get("summary") or "")
+        if doc_summary:
+            parts.append(f"文档摘要参考：{doc_summary[:400]}")
+        doc_key_points = document_profile.get("key_points") if isinstance(document_profile.get("key_points"), list) else []
+        if doc_key_points:
+            parts.append(f"文档要点：{'；'.join(str(p)[:120] for p in doc_key_points[:5])}")
 
     # R3: 根据 intent 关键词推断检索需要，追加意图修饰词让 query 更精准
     intent_lower = (intent + " " + title).lower()
@@ -385,6 +393,7 @@ def _retrieve_for_pages_uncached(
     prefer_user_doc = bool((retrieval_policy or {}).get("prefer_user_doc"))
     fallback_deepen = bool((retrieval_policy or {}).get("enable_fallback_deepen"))
     task_id = str((task or {}).get("task_id") or "")
+    task_doc_profile = ((task or {}).get("input") or {}).get("document_profile") if isinstance(task, dict) else None
     tavily_max = settings.retrieval_tavily_max_pages if tavily_enabled else 0
     tavily_used = 0
 
@@ -399,7 +408,7 @@ def _retrieve_for_pages_uncached(
             nonlocal tavily_used
             slide_id = str(slide.get("slide_id") or "")
             try:
-                query = _build_page_query(topic, slide, clarification_text)
+                query = _build_page_query(topic, slide, clarification_text, document_profile=task_doc_profile)
                 async with tavily_lock:
                     use_web = bool(settings.tavily_api_key) and (
                         tavily_enabled and (tavily_max == 0 or tavily_used < tavily_max)
@@ -447,6 +456,8 @@ def _build_page_prompt(
     topic: str,
     slide: dict,
     evidence_hits: list[dict],
+    *,
+    document_profile: dict[str, Any] | None = None,
 ) -> str:
     slide_id = str(slide.get("slide_id") or "")
     slide_title = str(slide.get("title") or "")
@@ -464,6 +475,19 @@ def _build_page_prompt(
         evidence_lines.append(f"- {eid}: {snippet}  (来源：{source})")
     evidence_block = "\n".join(evidence_lines) if evidence_lines else "（无参考资料）"
 
+    doc_context_block = ""
+    if document_profile and isinstance(document_profile, dict):
+        doc_lines: list[str] = []
+        doc_summary = str(document_profile.get("summary") or "").strip()
+        if doc_summary:
+            doc_lines.append(f"文档摘要：{doc_summary[:600]}")
+        doc_key_points = document_profile.get("key_points") if isinstance(document_profile.get("key_points"), list) else []
+        if doc_key_points:
+            kp_text = "；".join(str(p)[:150] for p in doc_key_points[:6])
+            doc_lines.append(f"文档关键要点：{kp_text}")
+        if doc_lines:
+            doc_context_block = "\n".join(doc_lines)
+
     return f"""你是PPT大纲助手。根据以下信息为指定页面生成完整的页面内容。
 
 ## 演示主题
@@ -473,6 +497,9 @@ def _build_page_prompt(
 - 页面标题：{slide_title}
 - 页面意图：{intent or "无"}
 - 用户补充要求：{user_notes or "无"}
+
+## 文档上下文（本页内容需与该文档主题一致）
+{doc_context_block or "（无文档上下文）"}
 
 ## 参考资料（仅供撰写内容时参考，勿在输出中填写证据编号）
 {evidence_block}
@@ -525,6 +552,7 @@ def _generate_single_page(
     topic: str,
     slide: dict,
     evidence_hits: list[dict],
+    document_profile: dict[str, Any] | None = None,
 ) -> dict:
     slide_id = str(slide.get("slide_id") or "")
     try:
@@ -543,7 +571,7 @@ def _generate_single_page(
             client_kwargs["base_url"] = settings.openai_base_url
         client = OpenAI(**client_kwargs)
 
-        prompt = _build_page_prompt(topic, slide, evidence_hits)
+        prompt = _build_page_prompt(topic, slide, evidence_hits, document_profile=document_profile)
         payload = {
             "model": settings.llm_model,
             "messages": [
@@ -685,6 +713,8 @@ def merge_pages_to_outline(
     page_results: dict[str, dict],
     retrieval_by_slide: dict[str, list[dict]],
     retrieval_depth: str,
+    *,
+    chapters: list[dict] | None = None,
 ) -> dict:
     slides: list[dict] = []
     evidence_catalog: list[dict] = []
@@ -695,6 +725,7 @@ def merge_pages_to_outline(
         page = page_results.get(slide_id)
         if page is None:
             page = _stub_page(slide)
+        page["chapter_id"] = slide.get("chapter_id")  # BE-1c: preserve chapter grouping
         hits = retrieval_by_slide.get(slide_id, [])
         bullets = page.get("bullets", [])
         low_confidence = 0
@@ -743,7 +774,7 @@ def merge_pages_to_outline(
             "evidence_trace": evidence_trace,
         })
 
-    return {
+    result: dict[str, Any] = {
         "title": topic,
         "slides": slides,
         "evidence_catalog": evidence_catalog,
@@ -763,6 +794,9 @@ def merge_pages_to_outline(
             ),
         },
     }
+    if chapters and isinstance(chapters, list) and chapters:
+        result["chapters"] = chapters
+    return result
 
 
 def generate_pages_from_skeleton(
@@ -797,6 +831,8 @@ def generate_pages_from_skeleton(
         slide_cache = {}
     clarification = task.get("clarification")
     skeleton = task.get("outline_skeleton", [])
+    outline_chapters = task.get("outline_skeleton_chapters") if isinstance(task.get("outline_skeleton_chapters"), list) else []
+    document_profile = input_data.get("document_profile") if isinstance(input_data.get("document_profile"), dict) else None
 
     if not skeleton or not isinstance(skeleton, list):
         raise RuntimeError("outline_skeleton is empty or invalid")
@@ -845,6 +881,7 @@ def generate_pages_from_skeleton(
             page_results,
             retrieval_by_slide,
             retrieval_depth,
+            chapters=outline_chapters,
         )
         partial_outline["meta"]["partial"] = True
         partial_outline["meta"]["completed_pages"] = completed_pages
@@ -918,7 +955,7 @@ def generate_pages_from_skeleton(
         for slide in skeleton:
             slide_id = str(slide.get("slide_id") or "")
             evidence = retrieval_by_slide.get(slide_id, [])
-            future = executor.submit(_generate_single_page, topic, slide, evidence)
+            future = executor.submit(_generate_single_page, topic, slide, evidence, document_profile)
             futures[future] = (slide_id, slide)
 
         for future in as_completed(futures):
@@ -980,7 +1017,7 @@ def generate_pages_from_skeleton(
         failed=failed_pages,
     )
 
-    outline = merge_pages_to_outline(topic, skeleton, page_results, retrieval_by_slide, retrieval_depth)
+    outline = merge_pages_to_outline(topic, skeleton, page_results, retrieval_by_slide, retrieval_depth, chapters=outline_chapters)
     outline["meta"]["partial"] = False
     outline["meta"]["completed_pages"] = completed_pages
     outline["meta"]["failed_pages"] = failed_pages

@@ -31,6 +31,10 @@ def test_generate_skeleton_uses_llm_when_configured(monkeypatch) -> None:  # typ
     class _Message:
         content = json.dumps(
             {
+                "chapters": [
+                    {"chapter_id": "ch1", "title": "核心机会", "slide_ids": ["s1", "s2"]},
+                    {"chapter_id": "ch2", "title": "落地路径", "slide_ids": ["s3", "s4", "s5"]},
+                ],
                 "slides": [
                     {"slide_id": "custom", "title": "AI 教学的核心机会", "intent": "说明机会", "user_notes": "强调课堂"},
                     {"slide_id": "bad-id", "title": "落地路径", "intent": "说明路径", "user_notes": ""},
@@ -61,7 +65,9 @@ def test_generate_skeleton_uses_llm_when_configured(monkeypatch) -> None:  # typ
     monkeypatch.setattr(skeleton.settings, "openai_base_url", None)
     monkeypatch.setattr(skeleton, "OpenAI", lambda **_: _Client())
 
-    slides = skeleton.generate_outline_skeleton(_task("5 页"))
+    result = skeleton.generate_outline_skeleton(_task("5 页"))
+    slides = result["slides"]
+    chapters = result["chapters"]
 
     assert captured["model"] == skeleton.settings.llm_model
     assert "response_format" in captured
@@ -72,13 +78,26 @@ def test_generate_skeleton_uses_llm_when_configured(monkeypatch) -> None:  # typ
     assert "bullets" not in slides[0]
     assert slides[2]["title"]
 
+    assert len(chapters) >= 2
+    assert chapters[0]["chapter_id"] == "ch1"
+    assert chapters[0]["slide_ids"] == ["s1", "s2"]
+    assert chapters[1]["chapter_id"] == "ch2"
+    assert chapters[1]["slide_ids"] == ["s3", "s4", "s5"]
+
 
 def test_generate_skeleton_falls_back_without_api_key(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr(skeleton.settings, "use_real_llm", True)
     monkeypatch.setattr(skeleton.settings, "openai_api_key", None)
 
-    slides = skeleton.generate_outline_skeleton(_task("6 页"))
+    result = skeleton.generate_outline_skeleton(_task("6 页"))
+    slides = result["slides"]
+    chapters = result["chapters"]
 
     assert len(slides) == 6
     assert slides[0]["slide_id"] == "s1"
     assert "生成式 AI 教学应用" in slides[0]["title"]
+
+    assert len(chapters) >= 2
+    assert all(len(ch.get("slide_ids", [])) > 0 for ch in chapters)
+    all_ch_slide_ids = [sid for ch in chapters for sid in ch.get("slide_ids", [])]
+    assert set(all_ch_slide_ids) == {s["slide_id"] for s in slides}

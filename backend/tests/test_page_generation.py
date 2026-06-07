@@ -801,8 +801,79 @@ def test_clean_evidence_snippet_truncates_at_sentence_boundary() -> None:
 def test_clean_evidence_snippet_preserves_fact_sentences() -> None:
     snippet = "首页。联系我们。据统计2024年AI市场规模达60亿美元。全行业增长迅速。"
     result = clean_evidence_snippet(snippet, max_chars=200)
-    # Nav-like sentences should be dropped, facts kept
     assert "据统计" in result
     assert "全行业增长迅速" in result
     assert "首页" not in result or "联系我们" not in result
+
+
+# ── BE-1b: long document page generation ────────────────────
+
+
+def test_build_page_query_with_document_profile() -> None:
+    slide = {"slide_id": "s1", "title": "市场规模分析", "intent": "分析市场现状", "user_notes": ""}
+    doc_profile = {
+        "summary": "AI教育市场2024年规模达60亿美元",
+        "key_points": ["市场规模60亿美元", "年增长率25%", "政策支持力度加大"],
+        "segments": ["分段一", "分段二"],
+        "segment_count": 5,
+        "char_count": 3000,
+        "keywords": ["AI", "教育", "市场"],
+    }
+    query = _build_page_query("AI教育", slide, "", document_profile=doc_profile)
+    assert "市场规模分析" in query
+    assert "AI教育市场2024年规模达60亿美元" in query
+    assert "年增长率25%" in query
+    assert "政策支持力度加大" in query
+
+
+def test_build_page_query_without_document_profile() -> None:
+    slide = {"slide_id": "s1", "title": "背景"}
+    query = _build_page_query("AI教育", slide, "")
+    assert "AI教育" in query
+    assert "背景" in query
+    assert "文档摘要参考" not in query
+
+
+def test_build_page_prompt_includes_document_context() -> None:
+    slide = {"slide_id": "s1", "title": "市场趋势", "intent": "", "user_notes": ""}
+    doc_profile = {
+        "summary": "AI教育市场快速增长，年增长率为25%。",
+        "key_points": ["市场规模达60亿美元", "政策支持加强"],
+    }
+    prompt = _build_page_prompt("AI教育", slide, [], document_profile=doc_profile)
+    assert "文档上下文" in prompt
+    assert "AI教育市场快速增长" in prompt
+    assert "市场规模达60亿美元" in prompt
+
+
+def test_build_page_prompt_no_document_context() -> None:
+    slide = {"slide_id": "s1", "title": "背景", "intent": "", "user_notes": ""}
+    prompt = _build_page_prompt("AI教育", slide, [])
+    assert "（无文档上下文）" in prompt
+
+
+def test_merge_pages_with_chapters() -> None:
+    skeleton = [
+        {"slide_id": "s1", "title": "背景", "intent": "", "user_notes": "", "chapter_id": "ch1"},
+        {"slide_id": "s2", "title": "现状", "intent": "", "user_notes": "", "chapter_id": "ch1"},
+        {"slide_id": "s3", "title": "方案", "intent": "", "user_notes": "", "chapter_id": "ch2"},
+    ]
+    chapters = [
+        {"chapter_id": "ch1", "title": "背景分析", "slide_ids": ["s1", "s2"]},
+        {"chapter_id": "ch2", "title": "方案设计", "slide_ids": ["s3"]},
+    ]
+    page_results = {
+        "s1": {"slide_id": "s1", "title": "背景", "bullets": [{"bullet_id": "s1-b1", "text": "A", "evidence_ids": []}], "speaker_notes": ""},
+        "s2": {"slide_id": "s2", "title": "现状", "bullets": [{"bullet_id": "s2-b1", "text": "B", "evidence_ids": []}], "speaker_notes": ""},
+        "s3": {"slide_id": "s3", "title": "方案", "bullets": [{"bullet_id": "s3-b1", "text": "C", "evidence_ids": []}], "speaker_notes": ""},
+    }
+    retrieval = {}
+
+    outline = merge_pages_to_outline("测试", skeleton, page_results, retrieval, "L1", chapters=chapters)
+    assert "chapters" in outline
+    assert len(outline["chapters"]) == 2
+    assert outline["chapters"][0]["chapter_id"] == "ch1"
+    assert outline["chapters"][1]["chapter_id"] == "ch2"
+    assert outline["slides"][0]["chapter_id"] == "ch1"
+    assert outline["slides"][2]["chapter_id"] == "ch2"
 
