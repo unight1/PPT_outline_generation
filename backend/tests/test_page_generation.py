@@ -10,7 +10,10 @@ from app.services.page_generation import (
     _build_page_query,
     _clarification_text,
     _filter_hits_by_quality,
+    _select_relevant_document_segments,
+    build_evidence_catalog_entry,
     clean_evidence_snippet,
+    generate_pages_from_skeleton,
     match_bullets_to_evidence,
     merge_pages_to_outline,
 )
@@ -124,6 +127,79 @@ def test_merge_pages_shared_evidence_across_bullets() -> None:
     assert set(trace[0]["bullet_ids"]) == {"s1-b1", "s1-b2"}
 
 
+def test_build_evidence_catalog_entry_shortens_long_snippet() -> None:
+    long_snippet = (
+        "研究报告指出，AI 教育工具可以提升个性化学习效率。"
+        "数据显示，教师能够用生成式工具更快完成备课和反馈。"
+        "该结论来自多所学校的长期跟踪研究。"
+        "同时，系统仍需要关注隐私、安全和公平性问题。"
+    )
+
+    entry = build_evidence_catalog_entry(
+        {
+            "evidence_id": "ev_1",
+            "snippet": long_snippet,
+            "source_id": "report.pdf",
+            "locator": "L1-L5",
+            "score": 0.9,
+        },
+        max_chars=80,
+    )
+
+    assert entry is not None
+    assert entry["source_id"] == "report.pdf"
+    assert len(entry["snippet"]) <= 80
+
+
+def test_generate_pages_retrieves_once_then_generates_each_page(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[str] = []
+
+    def fake_retrieve(topic, retrieval_depth, skeleton, clarification, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(f"retrieve:{len(skeleton)}")
+        return {
+            slide["slide_id"]: [
+                {
+                    "snippet": f"{slide['slide_id']} 的有效证据",
+                    "source_id": "report.pdf",
+                    "locator": "L1",
+                    "score": 0.9,
+                }
+            ]
+            for slide in skeleton
+        }, {}
+
+    def fake_generate(topic, slide, hits, document_profile=None):  # type: ignore[no-untyped-def]
+        calls.append(f"generate:{slide['slide_id']}")
+        return {
+            "slide_id": slide["slide_id"],
+            "title": slide["title"],
+            "key_message": slide["title"],
+            "bullets": [{"bullet_id": f"{slide['slide_id']}-b1", "text": f"{slide['title']} 有依据", "evidence_ids": []}],
+            "speaker_notes": "",
+        }
+
+    monkeypatch.setattr(page_generation, "retrieve_for_pages", fake_retrieve)
+    monkeypatch.setattr(page_generation, "_generate_single_page", fake_generate)
+
+    task = {
+        "task_id": "t1",
+        "input": {"topic": "AI 教育", "retrieval_depth": "L1"},
+        "clarification": {"questions": [], "submitted": True},
+        "outline_skeleton": [
+            {"slide_id": "s1", "title": "第一页", "intent": "", "user_notes": ""},
+            {"slide_id": "s2", "title": "第二页", "intent": "", "user_notes": ""},
+        ],
+        "outline_skeleton_chapters": [],
+        "runtime": {"retrieval_policy": {"retrieval_depth": "L1", "tavily_enabled": False}},
+    }
+
+    outline = generate_pages_from_skeleton(task=task, concurrency=2)
+
+    assert calls.count("retrieve:2") == 1
+    assert {"generate:s1", "generate:s2"}.issubset(set(calls))
+    assert len(outline["slides"]) == 2
+
+
 # ── _build_page_query ───────────────────────────────────────
 
 
@@ -142,6 +218,32 @@ def test_build_page_query_with_intent_and_notes() -> None:
     assert "要有对比图" in query
     assert "补充约束" in query
     assert "需要学术引用" in query
+
+
+def test_build_page_query_includes_regeneration_instruction() -> None:
+    slide = {
+        "slide_id": "s1",
+        "title": "案例页",
+        "intent": "说明应用价值",
+        "regeneration_instruction": "加入课堂案例，减少技术细节",
+    }
+    query = _build_page_query("AI 教育", slide, "")
+    assert "本次重生成要求" in query
+    assert "加入课堂案例" in query
+
+
+def test_build_page_query_includes_relevant_document_segments() -> None:
+    slide = {"slide_id": "s1", "title": "技术架构", "intent": "说明 RAG 检索架构"}
+    profile = {
+        "summary": "项目摘要",
+        "segments": [
+            "用户访谈强调页面视觉设计和配色一致性。",
+            "后端采用 RAG 检索架构，结合向量库与联网搜索补充证据。",
+        ],
+    }
+    query = _build_page_query("PPT 系统", slide, "", document_profile=profile)
+    assert "本页相关原文片段" in query
+    assert "向量库与联网搜索" in query
 
 
 def test_build_page_query_skips_empty_fields() -> None:
@@ -197,6 +299,46 @@ def test_build_page_prompt_intent_and_notes_included() -> None:
     prompt = _build_page_prompt("主题", slide, [])
     assert "介绍背景" in prompt
     assert "加入案例" in prompt
+
+
+def test_build_page_prompt_prioritizes_regeneration_instruction() -> None:
+    slide = {
+        "slide_id": "s1",
+        "title": "案例页",
+        "intent": "说明应用价值",
+        "regeneration_instruction": "加入课堂案例，减少技术细节",
+    }
+    prompt = _build_page_prompt("AI 教育", slide, [])
+    assert "本次重新生成要求" in prompt
+    assert "加入课堂案例，减少技术细节" in prompt
+    assert "必须优先满足它" in prompt
+
+
+def test_select_relevant_document_segments_prefers_slide_context() -> None:
+    slide = {"slide_id": "s1", "title": "上传 RAG", "intent": "说明任务级文档检索"}
+    profile = {
+        "segments": [
+            "前端统一主色、间距、卡片和按钮。",
+            "上传文档后按 task_id 建库，按页检索优先使用任务级文档。",
+        ]
+    }
+    segments = _select_relevant_document_segments(slide, profile)
+    assert len(segments) == 1
+    assert "task_id" in segments[0]
+
+
+def test_build_page_prompt_includes_relevant_document_segments() -> None:
+    slide = {"slide_id": "s1", "title": "长文档生成", "intent": "说明文档要点如何进入页面"}
+    profile = {
+        "summary": "长文档摘要",
+        "segments": [
+            "结果页采用一页一屏的浏览方式。",
+            "长文档分段后会选择与当前页面最相关的原文片段注入模型提示。",
+        ],
+    }
+    prompt = _build_page_prompt("PPT 系统", slide, [], document_profile=profile)
+    assert "本页相关原文片段" in prompt
+    assert "最相关的原文片段" in prompt
 
 
 def test_retrieve_for_pages_uses_parallel_budgeted_tavily(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -24,7 +24,13 @@ from app.services.generation import should_force_fail
 from app.services.orchestration import generate_outline_with_research
 from app.services.page_generation import SlideWorkflowError, generate_pages_from_skeleton
 from app.services.skeleton import generate_outline_skeleton
-from app.services.task_documents import DocumentUploadError, public_attachment, save_task_document
+from app.services.task_documents import (
+    DocumentUploadError,
+    filename_for_document_title,
+    public_attachment,
+    save_task_document,
+    save_task_document_text,
+)
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = logging.getLogger(__name__)
@@ -56,6 +62,7 @@ class SourceQuality(str, Enum):
 
 WorkflowPhase = Literal[
     "idle",
+    "document_analysis",
     "skeleton_llm",
     "skeleton_ready",
     "retrieving_page",
@@ -79,6 +86,10 @@ class CreateTaskRequest(BaseModel):
     source_type: Literal["short_topic", "long_document"] = "short_topic"
     audience: str | None = None
     duration_minutes: int = Field(default=15, ge=5, le=120)
+    target_pages: int | None = Field(default=None, ge=3, le=30)
+    target_pages_min: int | None = Field(default=None, ge=3, le=30)
+    target_pages_max: int | None = Field(default=None, ge=3, le=30)
+    desired_chapters: str | None = None
     language: str = "zh"
     retrieval_depth: RetrievalDepth = RetrievalDepth.l1
     raw_notes: str | None = None
@@ -89,6 +100,12 @@ class CreateTaskRequest(BaseModel):
     def validate_long_document_input(self) -> "CreateTaskRequest":
         if self.source_type == "long_document" and not (self.document_text or "").strip():
             raise ValueError("document_text is required when source_type=long_document")
+        if (
+            self.target_pages_min is not None
+            and self.target_pages_max is not None
+            and self.target_pages_min > self.target_pages_max
+        ):
+            raise ValueError("target_pages_min must be less than or equal to target_pages_max")
         return self
 
 
@@ -139,16 +156,37 @@ class OutlineSkeletonSlide(BaseModel):
     title: str = Field(min_length=1)
     intent: str | None = None
     user_notes: str | None = None
+    chapter_id: str | None = None
+
+
+class OutlineChapter(BaseModel):
+    chapter_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    slide_ids: list[str] = Field(default_factory=list)
 
 
 class PatchSkeletonRequest(BaseModel):
     slides: list[OutlineSkeletonSlide] = Field(min_length=1)
+    chapters: list[OutlineChapter] | None = None
 
     @model_validator(mode="after")
     def validate_unique_slide_ids(self) -> "PatchSkeletonRequest":
         slide_ids = [slide.slide_id for slide in self.slides]
         if len(slide_ids) != len(set(slide_ids)):
             raise ValueError("slide_id must be unique within outline_skeleton")
+        if self.chapters is not None:
+            valid_slide_ids = set(slide_ids)
+            chapter_ids = [chapter.chapter_id for chapter in self.chapters]
+            if len(chapter_ids) != len(set(chapter_ids)):
+                raise ValueError("chapter_id must be unique within chapters")
+            assigned_slide_ids: list[str] = []
+            for chapter in self.chapters:
+                for slide_id in chapter.slide_ids:
+                    if slide_id not in valid_slide_ids:
+                        raise ValueError("chapter slide_ids must reference existing slides")
+                    assigned_slide_ids.append(slide_id)
+            if len(assigned_slide_ids) != len(set(assigned_slide_ids)):
+                raise ValueError("each slide can belong to at most one chapter")
         return self
 
 
@@ -280,10 +318,21 @@ def _source_quality_default() -> str:
     return value if value in {"low", "medium", "high"} else "medium"
 
 
+def _normalize_retrieval_depth(value: Any) -> str:
+    if isinstance(value, RetrievalDepth):
+        return value.value
+    text = str(value or "L1").upper()
+    if text.endswith(".L0") or text.endswith("L0"):
+        return "L0"
+    if text.endswith(".L2") or text.endswith("L2"):
+        return "L2"
+    return "L1"
+
+
 def _default_retrieval_policy(task: dict[str, Any]) -> dict[str, Any]:
     input_payload = task.get("input") if isinstance(task.get("input"), dict) else {}
     return {
-        "retrieval_depth": str(input_payload.get("retrieval_depth") or "L1"),
+        "retrieval_depth": _normalize_retrieval_depth(input_payload.get("retrieval_depth")),
         "tavily_enabled": bool(settings.retrieval_tavily_enabled),
         "prefer_user_doc": str(input_payload.get("source_type") or "") == "long_document",
         "source_quality": _source_quality_default(),
@@ -321,9 +370,7 @@ def merge_retrieval_policy(task: dict[str, Any], payload: GenerateSlidesRequest 
         **{key: value for key, value in existing.items() if value is not None},
         **_policy_payload(payload),
     }
-    merged["retrieval_depth"] = str(merged.get("retrieval_depth") or "L1")
-    if merged["retrieval_depth"] not in {"L0", "L1", "L2"}:
-        merged["retrieval_depth"] = "L1"
+    merged["retrieval_depth"] = _normalize_retrieval_depth(merged.get("retrieval_depth"))
     merged["source_quality"] = str(merged.get("source_quality") or _source_quality_default()).lower()
     if merged["source_quality"] not in {"low", "medium", "high"}:
         merged["source_quality"] = _source_quality_default()
@@ -339,6 +386,49 @@ def persist_task(task: dict[str, Any]) -> None:
     TASK_STORE[task["task_id"]] = task
 
 
+def _clarification_payload_from_task(task: dict[str, Any]) -> CreateTaskRequest:
+    input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
+    duration = input_data.get("duration_minutes")
+    return CreateTaskRequest(
+        topic=str(input_data.get("topic") or "主题"),
+        source_type=input_data.get("source_type") or "short_topic",
+        audience=input_data.get("audience"),
+        duration_minutes=int(duration) if isinstance(duration, int) else 15,
+        target_pages_min=input_data.get("target_pages_min"),
+        target_pages_max=input_data.get("target_pages_max"),
+        desired_chapters=input_data.get("desired_chapters"),
+        language=str(input_data.get("language") or "zh"),
+        retrieval_depth=RetrievalDepth(_normalize_retrieval_depth(input_data.get("retrieval_depth"))),
+        raw_notes=input_data.get("raw_notes"),
+        document_text=input_data.get("document_text"),
+        document_title=input_data.get("document_title"),
+    )
+
+
+def _refresh_clarification_questions(task: dict[str, Any]) -> None:
+    input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
+    profile = input_data.get("document_profile")
+    payload = _clarification_payload_from_task(task)
+    task["clarification"] = {
+        "questions": build_clarification_questions(
+            payload,
+            document_profile=profile if isinstance(profile, dict) else None,
+            fallback_builder=build_default_clarification_questions,
+        ),
+        "submitted": False,
+    }
+    update_task_progress(task, "idle", "文档摘要已完成，请回答澄清问题。")
+
+
+def _finish_document_analysis(task: dict[str, Any], *, status: str) -> None:
+    runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
+    runtime["document_analysis_status"] = status
+    task["runtime"] = runtime
+    _refresh_clarification_questions(task)
+    task["updated_at"] = now_iso()
+    persist_task(task)
+
+
 def _enrich_document_profile_background(task_id: str) -> None:
     try:
         task = fetch_task(task_id)
@@ -347,11 +437,7 @@ def _enrich_document_profile_background(task_id: str) -> None:
         input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
         document_text = str(input_data.get("document_text") or "")
         if not document_text.strip():
-            runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
-            runtime["document_analysis_status"] = "done"
-            task["runtime"] = runtime
-            task["updated_at"] = now_iso()
-            persist_task(task)
+            _finish_document_analysis(task, status="done")
             return
 
         topic = str(input_data.get("topic") or "")
@@ -365,21 +451,13 @@ def _enrich_document_profile_background(task_id: str) -> None:
         merged = merge_enrichment_into_profile(rule_profile, enrichment)
         input_data["document_profile"] = merged
         task["input"] = input_data
-        runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
-        runtime["document_analysis_status"] = "done"
-        task["runtime"] = runtime
-        task["updated_at"] = now_iso()
-        persist_task(task)
+        _finish_document_analysis(task, status="done")
         logger.info("Document profile enriched task_id=%s", task_id)
-    except Exception as exc:
+    except Exception:
         logger.exception("Document profile enrichment failed task_id=%s", task_id)
         task = fetch_task(task_id)
         if task is not None:
-            runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
-            runtime["document_analysis_status"] = "failed"
-            task["runtime"] = runtime
-            task["updated_at"] = now_iso()
-            persist_task(task)
+            _finish_document_analysis(task, status="failed")
 
 
 def fetch_task(task_id: str) -> dict[str, Any] | None:
@@ -525,6 +603,9 @@ def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
         ]
     else:
         input_payload["attachments"] = []
+    skeleton_chapters = task.get("outline_skeleton_chapters")
+    if not isinstance(skeleton_chapters, list) or not skeleton_chapters:
+        skeleton_chapters = _rebuild_skeleton_chapters_from_slides(task.get("outline_skeleton"))
     # Keep v0 fields while exposing the v1 workflow fields for new clients.
     return {
         "task_id": task["task_id"],
@@ -534,13 +615,37 @@ def task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
         "updated_at": task["updated_at"],
         "clarification": task["clarification"],
         "outline_skeleton": task.get("outline_skeleton"),
-        "outline_skeleton_chapters": task.get("outline_skeleton_chapters"),
+        "outline_skeleton_chapters": skeleton_chapters,
         "outline": task.get("outline"),
         "progress": task.get("progress"),
         "error": task.get("error"),
         "input": input_payload,
         "runtime": task.get("runtime"),
     }
+
+
+def _rebuild_skeleton_chapters_from_slides(skeleton: Any) -> list[dict[str, Any]]:
+    if not isinstance(skeleton, list) or not skeleton:
+        return []
+    grouped: dict[str, list[str]] = {}
+    title_by_chapter: dict[str, str] = {}
+    for slide in skeleton:
+        if not isinstance(slide, dict):
+            continue
+        slide_id = str(slide.get("slide_id") or "")
+        chapter_id = str(slide.get("chapter_id") or "")
+        if not slide_id or not chapter_id:
+            continue
+        grouped.setdefault(chapter_id, []).append(slide_id)
+        title_by_chapter.setdefault(chapter_id, str(slide.get("title") or chapter_id))
+    return [
+        {
+            "chapter_id": chapter_id,
+            "title": f"章节：{title_by_chapter.get(chapter_id, chapter_id)}",
+            "slide_ids": slide_ids,
+        }
+        for chapter_id, slide_ids in grouped.items()
+    ]
 
 
 def _rebuild_page_evidence_map(outline: dict[str, Any]) -> None:
@@ -599,6 +704,15 @@ def create_task(payload: CreateTaskRequest) -> CreateTaskResponse:
     input_payload["attachments"] = []
     if payload.source_type == "long_document":
         input_payload["document_profile"] = build_document_profile(payload.document_text)
+        try:
+            attachment = save_task_document_text(
+                task_id,
+                str(payload.document_text or ""),
+                filename=filename_for_document_title(payload.document_title),
+            )
+            input_payload["attachments"] = [public_attachment(attachment)]
+        except DocumentUploadError as exc:
+            raise build_error(status.HTTP_422_UNPROCESSABLE_ENTITY, exc.code, exc.message, exc.details) from exc
     else:
         input_payload["document_profile"] = None
 
@@ -623,22 +737,24 @@ def create_task(payload: CreateTaskRequest) -> CreateTaskResponse:
         "created_at": created_at,
         "updated_at": created_at,
         "input": input_payload,
-        # Initialize a structured clarification template for "understand first, then generate".
-        "clarification": {
-            "questions": build_clarification_questions(
-                payload,
-                document_profile=input_payload.get("document_profile"),
-                fallback_builder=build_default_clarification_questions,
-            ),
-            "submitted": False,
-        },
+        "clarification": {"questions": [], "submitted": False},
         "outline_skeleton": None,
         "outline": None,
-        "progress": build_progress("idle", "任务已创建，等待提交澄清。"),
+        "progress": None,
         "error": None,
         "runtime": runtime,
     }
     task["runtime"]["retrieval_policy"] = _default_retrieval_policy(task)
+    if doc_analysis_status == "running":
+        update_task_progress(
+            task,
+            "document_analysis",
+            "正在分析长文档并提炼摘要，完成后将生成澄清问题。",
+        )
+    else:
+        _refresh_clarification_questions(task)
+        if not task.get("progress"):
+            update_task_progress(task, "idle", "任务已创建，等待提交澄清。")
     persist_task(task)
     logger.info("Task created task_id=%s status=%s", task_id, task["status"])
 
@@ -831,8 +947,48 @@ def patch_skeleton(task_id: UUID, payload: PatchSkeletonRequest) -> dict[str, An
     if not task.get("outline_skeleton"):
         raise build_error(status.HTTP_409_CONFLICT, "INVALID_STATE", "Skeleton has not been generated yet.")
 
-    slides = [slide.model_dump() for slide in payload.slides]
+    old_chapter_by_slide: dict[str, str] = {}
+    old_skeleton = task.get("outline_skeleton")
+    if isinstance(old_skeleton, list):
+        for item in old_skeleton:
+            if not isinstance(item, dict):
+                continue
+            slide_id = str(item.get("slide_id") or "")
+            chapter_id = item.get("chapter_id")
+            if slide_id and chapter_id:
+                old_chapter_by_slide[slide_id] = str(chapter_id)
+    slides = []
+    for slide in payload.slides:
+        item = slide.model_dump()
+        if not item.get("chapter_id"):
+            item["chapter_id"] = old_chapter_by_slide.get(item["slide_id"])
+        slides.append(item)
     task["outline_skeleton"] = slides
+    if payload.chapters is not None:
+        chapters = [chapter.model_dump() for chapter in payload.chapters]
+        chapter_by_slide: dict[str, str] = {}
+        for chapter in chapters:
+            for slide_id in chapter.get("slide_ids", []):
+                chapter_by_slide[str(slide_id)] = str(chapter["chapter_id"])
+        for slide in slides:
+            slide["chapter_id"] = chapter_by_slide.get(str(slide["slide_id"]))
+        task["outline_skeleton_chapters"] = chapters
+    else:
+        chapters = task.get("outline_skeleton_chapters")
+        if isinstance(chapters, list):
+            valid_slide_ids = {str(slide["slide_id"]) for slide in slides}
+            task["outline_skeleton_chapters"] = [
+                {
+                    **chapter,
+                    "slide_ids": [
+                        str(slide_id)
+                        for slide_id in (chapter.get("slide_ids") or [])
+                        if str(slide_id) in valid_slide_ids
+                    ],
+                }
+                for chapter in chapters
+                if isinstance(chapter, dict)
+            ]
     if task["status"] == TaskStatus.failed.value:
         task["status"] = TaskStatus.pending.value
         task["error"] = None
@@ -980,6 +1136,16 @@ def patch_clarification(task_id: UUID, payload: PatchClarificationRequest) -> di
             {"status": task["status"]},
         )
 
+    runtime = task.get("runtime") if isinstance(task.get("runtime"), dict) else {}
+    questions = task.get("clarification", {}).get("questions") if isinstance(task.get("clarification"), dict) else []
+    if runtime.get("document_analysis_status") == "running" or not questions:
+        raise build_error(
+            status.HTTP_409_CONFLICT,
+            "INVALID_STATE",
+            "Clarification is not ready until document analysis finishes.",
+            {"document_analysis_status": runtime.get("document_analysis_status")},
+        )
+
     question_map = {item["question_id"]: item for item in task["clarification"]["questions"]}
     for answer_item in payload.answers:
         if answer_item.question_id in question_map:
@@ -1030,7 +1196,7 @@ def complete_skeleton_generation(task_id: str) -> None:
         task["runtime"] = runtime
         task["updated_at"] = now_iso()
         persist_task(task)
-        logger.info("Skeleton completed task_id=%s slides=%s", task_id, len(skeleton))
+        logger.info("Skeleton completed task_id=%s slides=%s chapters=%s", task_id, len(slides), len(chapters))
     except Exception as exc:
         logger.exception("Skeleton generation crashed task_id=%s", task_id)
         task = fetch_task(task_id)
@@ -1366,11 +1532,21 @@ def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str
         if target_slide is None:
             return
 
+        skeleton_source = task.get("outline_skeleton")
+        skeleton_original: dict[str, Any] = {}
+        if isinstance(skeleton_source, list):
+            for item in skeleton_source:
+                if isinstance(item, dict) and item.get("slide_id") == slide_id:
+                    skeleton_original = dict(item)
+                    break
+
         skeleton_entry = {
             "slide_id": slide_id,
-            "title": target_slide.get("title", ""),
-            "intent": "",
-            "user_notes": user_instruction or "",
+            "title": target_slide.get("title") or skeleton_original.get("title") or "",
+            "intent": skeleton_original.get("intent") or target_slide.get("key_message") or "",
+            "user_notes": skeleton_original.get("user_notes") or "",
+            "chapter_id": target_slide.get("chapter_id") or skeleton_original.get("chapter_id"),
+            "regeneration_instruction": user_instruction or "",
         }
 
         retrieval_policy = merge_retrieval_policy(task)
@@ -1379,6 +1555,8 @@ def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str
         clarification = task.get("clarification")
 
         from app.services.page_generation import (
+            build_evidence_catalog_entry,
+            match_bullets_to_evidence,
             retrieve_for_pages,
             _generate_single_page,
         )
@@ -1407,18 +1585,17 @@ def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str
         task["updated_at"] = now_iso()
         persist_task(task)
 
-        if user_instruction:
-            new_slide = _generate_single_page(topic, skeleton_entry, hits)
-        else:
-            new_slide = _generate_single_page(topic, skeleton_entry, hits)
+        new_slide = _generate_single_page(topic, skeleton_entry, hits)
+        if skeleton_entry.get("chapter_id"):
+            new_slide["chapter_id"] = skeleton_entry["chapter_id"]
 
         hit_ids = [str(hit.get("evidence_id") or "") for hit in hits if str(hit.get("evidence_id") or "")]
         bullets = new_slide.get("bullets", [])
         if isinstance(bullets, list):
-            for idx, bullet in enumerate(bullets):
-                if not isinstance(bullet, dict):
-                    continue
-                bullet["evidence_ids"] = [hit_ids[min(idx, len(hit_ids) - 1)]] if hit_ids else []
+            matched_bullets, _low_confidence = match_bullets_to_evidence(bullets, hits)
+            if matched_bullets and hit_ids and not any(isinstance(bullet, dict) and bullet.get("evidence_ids") for bullet in matched_bullets):
+                matched_bullets[0]["evidence_ids"] = [hit_ids[0]]
+            new_slide["bullets"] = matched_bullets
 
         # Merge new page into existing outline
         slides[target_idx] = new_slide
@@ -1454,14 +1631,9 @@ def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str
                 new_catalog.append(ev)
         # Add new evidence
         for hit in hits:
-            new_catalog.append({
-                "evidence_id": hit.get("evidence_id", ""),
-                "snippet": str(hit.get("snippet") or ""),
-                "source_id": str(hit.get("source_id") or "unknown"),
-                "locator": str(hit.get("locator") or ""),
-                "score": hit.get("score"),
-                "confidence": hit.get("confidence"),
-            })
+            entry = build_evidence_catalog_entry(hit)
+            if entry is not None:
+                new_catalog.append(entry)
         outline["evidence_catalog"] = new_catalog
         _rebuild_page_evidence_map(outline)
 

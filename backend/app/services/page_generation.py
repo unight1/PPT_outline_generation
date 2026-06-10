@@ -199,6 +199,30 @@ def _merge_preferred_hits(primary: list[dict], secondary: list[dict], limit: int
     return merged
 
 
+def _hit_quality_score(hit: dict) -> float:
+    values: list[float] = []
+    for value in (hit.get("score"), hit.get("confidence")):
+        try:
+            values.append(max(0.0, min(1.0, float(value))))
+        except (TypeError, ValueError):
+            continue
+    return max(values) if values else 0.0
+
+
+def build_evidence_catalog_entry(hit: dict, *, max_chars: int = 180) -> dict[str, Any] | None:
+    cleaned = clean_evidence_snippet(str(hit.get("snippet") or ""), max_chars=max_chars)
+    if not cleaned:
+        return None
+    return {
+        "evidence_id": str(hit.get("evidence_id") or ""),
+        "snippet": cleaned,
+        "source_id": str(hit.get("source_id") or "unknown"),
+        "locator": str(hit.get("locator") or ""),
+        "score": hit.get("score"),
+        "confidence": hit.get("confidence"),
+    }
+
+
 def _classify_retrieval_exception(exc: Exception, slide_id: str) -> SlideWorkflowError:
     if isinstance(exc, SlideWorkflowError):
         return exc
@@ -268,6 +292,9 @@ def _build_page_query(topic: str, slide: dict, clarification_text: str, *, docum
     notes = str(slide.get("user_notes") or "")
     if notes:
         parts.append(f"用户备注：{notes}")
+    regeneration_instruction = str(slide.get("regeneration_instruction") or "").strip()
+    if regeneration_instruction:
+        parts.append(f"本次重生成要求：{regeneration_instruction}")
     if clarification_text:
         parts.append(f"补充约束：{clarification_text}")
 
@@ -278,6 +305,9 @@ def _build_page_query(topic: str, slide: dict, clarification_text: str, *, docum
         doc_key_points = document_profile.get("key_points") if isinstance(document_profile.get("key_points"), list) else []
         if doc_key_points:
             parts.append(f"文档要点：{'；'.join(str(p)[:120] for p in doc_key_points[:5])}")
+        relevant_segments = _select_relevant_document_segments(slide, document_profile, limit=2)
+        if relevant_segments:
+            parts.append(f"本页相关原文片段：{'；'.join(relevant_segments)}")
 
     # R3: 根据 intent 关键词推断检索需要，追加意图修饰词让 query 更精准
     intent_lower = (intent + " " + title).lower()
@@ -293,6 +323,55 @@ def _build_page_query(topic: str, slide: dict, clarification_text: str, *, docum
         parts.append("检索需求：需要方案设计、架构说明或实施路径")
 
     return "\n".join(parts)
+
+
+def _select_relevant_document_segments(
+    slide: dict[str, Any],
+    document_profile: dict[str, Any] | None,
+    *,
+    limit: int = 2,
+) -> list[str]:
+    if not isinstance(document_profile, dict):
+        return []
+    segments = document_profile.get("segments")
+    if not isinstance(segments, list):
+        return []
+
+    query_text = " ".join(
+        str(slide.get(key) or "")
+        for key in ("title", "intent", "user_notes")
+    ).lower()
+    query_tokens = _document_match_tokens(query_text)
+    scored: list[tuple[int, int, str]] = []
+    for idx, segment in enumerate(segments):
+        text = " ".join(str(segment or "").split()).strip()
+        if not text:
+            continue
+        lowered_text = text.lower()
+        segment_tokens = _document_match_tokens(lowered_text)
+        overlap = len(query_tokens & segment_tokens) if query_tokens else 0
+        # Chinese titles are often shorter than document chunks, so substring hits
+        # catch matches like "上传" inside "上传文档后".
+        substring_hits = sum(1 for token in query_tokens if token and token in lowered_text)
+        overlap += substring_hits
+        scored.append((overlap, -idx, text[:500]))
+
+    if not scored:
+        return []
+    scored.sort(reverse=True)
+    selected = [text for score, _idx, text in scored if score > 0][:limit]
+    if selected:
+        return selected
+    return [text for _score, _idx, text in scored[:1]]
+
+
+def _document_match_tokens(text: str) -> set[str]:
+    tokens = set(re.findall(r"[a-zA-Z]{3,}", text.lower()))
+    for chunk in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+        tokens.add(chunk)
+        if len(chunk) > 2:
+            tokens.update(chunk[idx : idx + 2] for idx in range(len(chunk) - 1))
+    return tokens
 
 
 def _clarification_text(clarification: dict | None) -> str:
@@ -463,6 +542,7 @@ def _build_page_prompt(
     slide_title = str(slide.get("title") or "")
     intent = str(slide.get("intent") or "")
     user_notes = str(slide.get("user_notes") or "")
+    regeneration_instruction = str(slide.get("regeneration_instruction") or "").strip()
 
     evidence_lines: list[str] = []
     for idx, ev in enumerate(evidence_hits, start=1):
@@ -485,6 +565,10 @@ def _build_page_prompt(
         if doc_key_points:
             kp_text = "；".join(str(p)[:150] for p in doc_key_points[:6])
             doc_lines.append(f"文档关键要点：{kp_text}")
+        relevant_segments = _select_relevant_document_segments(slide, document_profile, limit=2)
+        if relevant_segments:
+            doc_lines.append("本页相关原文片段：")
+            doc_lines.extend(f"- {segment}" for segment in relevant_segments)
         if doc_lines:
             doc_context_block = "\n".join(doc_lines)
 
@@ -497,6 +581,9 @@ def _build_page_prompt(
 - 页面标题：{slide_title}
 - 页面意图：{intent or "无"}
 - 用户补充要求：{user_notes or "无"}
+
+## 本次重新生成要求
+{regeneration_instruction or "（无，按原页面目标重新生成）"}
 
 ## 文档上下文（本页内容需与该文档主题一致）
 {doc_context_block or "（无文档上下文）"}
@@ -521,7 +608,8 @@ def _build_page_prompt(
 2) 每条 bullet 的 text 必须具体、可讲，避免「加强XX」「提升YY」等空话；有参考资料时融入事实、数据或案例表述；
 3) key_message 必须输出非空字符串，与 bullets 内容一致、可独立读懂；
 4) 要点内容若来自参考资料，在 text 中自然表述即可；证据引用由系统在生成后自动绑定；
-5) 不要输出 Markdown，不要输出解释文字，只输出 JSON。"""
+5) 如果“本次重新生成要求”非空，必须优先满足它；如果它和原页面目标冲突，以本次要求为准；
+6) 不要输出 Markdown，不要输出解释文字，只输出 JSON。"""
 
 
 def _extract_json_object(content: str) -> dict:
@@ -650,7 +738,7 @@ def _stub_page(slide: dict) -> dict:
 def match_bullets_to_evidence(
     bullets: list[dict],
     evidence_hits: list[dict],
-    min_score: float = 0.3,
+    min_score: float = 0.2,
 ) -> tuple[list[dict], int]:
     """用关键词重叠 + 分数阈值匹配 bullet 与 evidence，返回 (更新后的bullets, low_confidence_count)。"""
     if not evidence_hits:
@@ -669,17 +757,24 @@ def match_bullets_to_evidence(
             low_count += 1
             continue
 
-        chars = set(bullet_text)
         has_spaces = " " in bullet_text
         is_english = has_spaces and sum(1 for c in bullet_text if c.isascii() and c.isalpha()) > len(bullet_text) * 0.5
+        bullet_tokens = _document_match_tokens(bullet_text)
         best_score = 0.0
         best_eid = ""
+        best_fallback_eid = ""
+        best_fallback_quality = 0.0
 
         _STOPWORDS = {"a", "an", "the", "in", "on", "at", "of", "to", "for", "and", "or", "is", "are", "was", "were", "be", "been", "has", "have", "it", "its", "this", "that", "with", "from", "by", "as", "can", "will", "not", "but", "we", "they", "their", "our"}
         for ev in evidence_hits:
             snippet = str(ev.get("snippet") or "")
             if not snippet:
                 continue
+            quality = _hit_quality_score(ev)
+            eid = str(ev.get("evidence_id") or "")
+            if eid and quality > best_fallback_quality:
+                best_fallback_quality = quality
+                best_fallback_eid = eid
             if is_english:
                 b_words = set(bullet_text.lower().split()) - _STOPWORDS
                 s_words = set(snippet.lower().split()) - _STOPWORDS
@@ -687,10 +782,15 @@ def match_bullets_to_evidence(
                     continue
                 overlap = len(b_words & s_words) / max(1, len(b_words | s_words))
             else:
-                snippet_chars = set(snippet)
-                if not chars or not snippet_chars:
-                    continue
-                overlap = len(chars & snippet_chars) / max(1, len(chars | snippet_chars))
+                snippet_tokens = _document_match_tokens(snippet)
+                if bullet_tokens and snippet_tokens:
+                    overlap = len(bullet_tokens & snippet_tokens) / max(1, min(len(bullet_tokens), len(snippet_tokens)))
+                else:
+                    chars = {ch for ch in bullet_text if ch.strip()}
+                    snippet_chars = {ch for ch in snippet if ch.strip()}
+                    if not chars or not snippet_chars:
+                        continue
+                    overlap = len(chars & snippet_chars) / max(1, len(chars | snippet_chars))
             if overlap == 0:
                 continue
             ev_score = float(ev.get("score") or 0.5)
@@ -701,6 +801,8 @@ def match_bullets_to_evidence(
 
         if best_eid and best_score >= min_score:
             bullet["evidence_ids"] = [best_eid]
+        elif min_score <= 0.2 and best_fallback_eid and best_fallback_quality >= 0.5:
+            bullet["evidence_ids"] = [best_fallback_eid]
         else:
             low_count += 1
 
@@ -737,18 +839,10 @@ def merge_pages_to_outline(
         # Collect evidence for this page (with cleaning)
         added_count = 0
         for hit in hits:
-            raw_snippet = str(hit.get("snippet") or "")
-            cleaned = clean_evidence_snippet(raw_snippet, max_chars=200)
-            if not cleaned:
+            entry = build_evidence_catalog_entry(hit)
+            if entry is None:
                 continue
-            evidence_catalog.append({
-                "evidence_id": str(hit.get("evidence_id") or ""),
-                "snippet": cleaned,
-                "source_id": str(hit.get("source_id") or "unknown"),
-                "locator": str(hit.get("locator") or ""),
-                "score": hit.get("score"),
-                "confidence": hit.get("confidence"),
-            })
+            evidence_catalog.append(entry)
             added_count += 1
         coverage_total += added_count
 
@@ -890,31 +984,6 @@ def generate_pages_from_skeleton(
 
         task["outline"] = partial_outline
 
-    # Phase 1: retrieve evidence for all pages
-    _update("retrieving_page", 0, total, "正在检索相关资料...", 0)
-    retrieval_by_slide, slide_cache = retrieve_for_pages(
-        topic,
-        retrieval_depth,
-        skeleton,
-        clarification,
-        tavily_enabled=use_tavily,
-        slide_cache=slide_cache,
-        force_refresh=force_refresh,
-        retrieval_policy=retrieval_policy,
-        task=task,
-    )
-    runtime["retrieval_cache"] = slide_cache
-    task["runtime"] = runtime
-    if on_progress:
-        on_progress(task)
-
-    # Assign evidence IDs
-    ev_counter = 1
-    for slide_id, hits in retrieval_by_slide.items():
-        for hit in hits:
-            hit["evidence_id"] = f"ev_{ev_counter}"
-            ev_counter += 1
-
     task["outline"] = {
         "title": topic,
         "slides": [],
@@ -935,33 +1004,68 @@ def generate_pages_from_skeleton(
         },
     }
     _update(
-        "llm_page",
+        "retrieving_page",
         0,
         total,
-        "正在生成页面内容...",
+        "正在按页检索并生成页面内容...",
         0,
         completed=0,
         failed=0,
     )
 
-    # Phase 2: generate each page with concurrency control
+    # Phase 2: retrieve once for the whole skeleton, then generate pages concurrently.
     page_results: dict[str, dict] = {}
+    retrieval_by_slide: dict[str, list[dict]] = {}
     processed_pages = 0
     completed_pages = 0
     failed_pages = 0
+
+    retrieval_by_slide, updated_cache = retrieve_for_pages(
+        topic,
+        retrieval_depth,
+        skeleton,
+        clarification,
+        tavily_enabled=use_tavily,
+        slide_cache=slide_cache,
+        force_refresh=force_refresh,
+        retrieval_policy=retrieval_policy,
+        task=task,
+    )
+    slide_cache.update(updated_cache)
+    runtime["retrieval_cache"] = slide_cache
+    task["runtime"] = runtime
+    for slide in skeleton:
+        slide_id = str(slide.get("slide_id") or "")
+        for idx, hit in enumerate(retrieval_by_slide.get(slide_id, []), start=1):
+            hit["evidence_id"] = f"ev_{slide_id}_{idx}"
+
+    _update(
+        "llm_page",
+        0,
+        total,
+        "参考资料检索完成，正在并发生成页面内容...",
+        10,
+        completed=0,
+        failed=0,
+    )
+
+    def _generate_page(slide: dict) -> tuple[str, dict]:
+        slide_id = str(slide.get("slide_id") or "")
+        hits = retrieval_by_slide.get(slide_id, [])
+        page = _generate_single_page(topic, slide, hits, document_profile)
+        return slide_id, page
 
     with ThreadPoolExecutor(max_workers=max(1, min(concurrency, total))) as executor:
         futures = {}
         for slide in skeleton:
             slide_id = str(slide.get("slide_id") or "")
-            evidence = retrieval_by_slide.get(slide_id, [])
-            future = executor.submit(_generate_single_page, topic, slide, evidence, document_profile)
+            future = executor.submit(_generate_page, slide)
             futures[future] = (slide_id, slide)
 
         for future in as_completed(futures):
             slide_id, slide = futures[future]
             try:
-                page = future.result()
+                _returned_slide_id, page = future.result()
                 page["generation_status"] = "done"
                 page_results[slide_id] = page
                 completed_pages += 1

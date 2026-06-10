@@ -20,6 +20,17 @@ def estimate_page_range(duration_minutes: int) -> str:
     return f"{low}-{high} 页"
 
 
+def _target_page_answer(payload: Any) -> str:
+    min_pages = getattr(payload, "target_pages_min", None)
+    max_pages = getattr(payload, "target_pages_max", None)
+    if isinstance(min_pages, int) and isinstance(max_pages, int):
+        return f"{min_pages}-{max_pages} 页"
+    pages = getattr(payload, "target_pages", None)
+    if isinstance(pages, int) and pages > 0:
+        return f"{pages} 页"
+    return estimate_page_range(payload.duration_minutes)
+
+
 def build_fallback_clarification_questions(payload: Any) -> list[dict[str, Any]]:
     """Return contract-safe text questions when LLM is unavailable or disabled."""
     questions: list[dict[str, Any]] = [
@@ -67,7 +78,7 @@ def build_fallback_clarification_questions(payload: Any) -> list[dict[str, Any]]
         {
             "question_id": "page_range",
             "prompt": "期望页数范围是多少（例如 8-12 页）？",
-            "answer": estimate_page_range(payload.duration_minutes),
+            "answer": _target_page_answer(payload),
         }
     )
     return questions
@@ -128,7 +139,7 @@ def _call_llm(payload: Any, *, document_profile: dict[str, Any] | None) -> list[
 3. 每题只能包含 question_id、prompt、answer 三个字段。
 4. 不要输出 options、type、choices、input_type 等选择题字段。
 5. 已明确填写的信息不要重复追问；可对时长预填 answer。
-6. 题干要贴合主题，避免泛泛而问。
+6. 题干要贴合主题，主要从内容角度提问，避免泛泛而问。
 """
     payload_kwargs = {
         "model": settings.llm_model,

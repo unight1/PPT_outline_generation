@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { NModal } from 'naive-ui'
+import { NButton, NInput, NModal, NSpace, NText } from 'naive-ui'
 import type { Evidence, Slide } from '../types/task'
 
 const props = defineProps<{
@@ -14,10 +14,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'update:slide', slide: Slide): void
-  (e: 'regenerate', slideId: string): void
+  (e: 'regenerate', slideId: string, userInstruction?: string): void
 }>()
 
 const showEvidence = ref(false)
+const showRegenerate = ref(false)
+const regenerateInstruction = ref('')
 
 const slideEvidence = computed(() => {
   if (!props.evidenceCatalog) return []
@@ -37,6 +39,16 @@ function updateBulletText(bulletId: string, text: string) {
     ),
   })
 }
+
+function openRegenerateDialog() {
+  regenerateInstruction.value = ''
+  showRegenerate.value = true
+}
+
+function submitRegenerate() {
+  emit('regenerate', props.slide.slide_id, regenerateInstruction.value.trim() || undefined)
+  showRegenerate.value = false
+}
 </script>
 
 <template>
@@ -48,9 +60,14 @@ function updateBulletText(bulletId: string, text: string) {
         @input="emitUpdate({ title: ($event.target as HTMLInputElement).value })" />
       <strong v-else class="page-title-label">{{ slide.title || '(未命名)' }}</strong>
       <button v-if="editable" class="secondary small" :disabled="regenerating" type="button"
-        @click="$emit('regenerate', slide.slide_id)">
+        @click="openRegenerateDialog">
         {{ regenerating ? '重生成中...' : '重新生成' }}
       </button>
+    </div>
+
+    <div v-if="slide.generation_status === 'failed'" class="slide-error">
+      <strong>本页生成失败</strong>
+      <span>{{ slide.error?.message || '可以稍后重新生成这一页。' }}</span>
     </div>
 
     <!-- Key message -->
@@ -77,20 +94,19 @@ function updateBulletText(bulletId: string, text: string) {
       </ul>
     </div>
 
-    <!-- Secondary fields: 2-column -->
-    <div class="field-row two-col">
-      <div class="field-col">
-        <label class="field-label">讲者备注</label>
-        <textarea v-if="editable" class="field-input" :value="slide.speaker_notes ?? ''" rows="3"
-          @input="emitUpdate({ speaker_notes: ($event.target as HTMLTextAreaElement).value })" />
-        <p v-else class="hint-text">{{ slide.speaker_notes || '—' }}</p>
-      </div>
-      <div class="field-col">
-        <label class="field-label">配图建议</label>
-        <input v-if="editable" class="field-input" :value="slide.visual_suggestion ?? ''" placeholder="柱状图 / 流程图..."
-          @input="emitUpdate({ visual_suggestion: ($event.target as HTMLInputElement).value })" />
-        <p v-else class="hint-text">{{ slide.visual_suggestion || '—' }}</p>
-      </div>
+    <div class="field-row">
+      <label class="field-label">讲者备注</label>
+      <textarea v-if="editable" class="field-input speaker-notes-input" :value="slide.speaker_notes ?? ''" rows="6"
+        @input="emitUpdate({ speaker_notes: ($event.target as HTMLTextAreaElement).value })" />
+      <p v-else class="hint-text hint-multiline speaker-notes-text">{{ slide.speaker_notes || '—' }}</p>
+    </div>
+
+    <div class="field-row">
+      <label class="field-label">配图建议</label>
+      <textarea v-if="editable" class="field-input visual-input" :value="slide.visual_suggestion ?? ''" rows="2"
+        placeholder="柱状图 / 流程图..."
+        @input="emitUpdate({ visual_suggestion: ($event.target as HTMLTextAreaElement).value })" />
+      <p v-else class="hint-text hint-multiline">{{ slide.visual_suggestion || '—' }}</p>
     </div>
 
     <div class="field-row">
@@ -119,6 +135,32 @@ function updateBulletText(bulletId: string, text: string) {
           <small class="ev-detail">{{ ev.locator }} · score: {{ ev.score?.toFixed(2) ?? '—' }}</small>
         </article>
       </div>
+    </n-modal>
+
+    <n-modal
+      v-model:show="showRegenerate"
+      preset="card"
+      title="重新生成本页"
+      style="width:min(560px,95vw)"
+      :mask-closable="true"
+    >
+      <n-space vertical :size="12">
+        <n-text depth="3">
+          可以写明希望这一页如何修改，例如“更强调数据”“加入课堂案例”“减少技术细节”。
+        </n-text>
+        <n-input
+          v-model:value="regenerateInstruction"
+          type="textarea"
+          :rows="4"
+          placeholder="请输入本页重新生成要求（可选）"
+        />
+        <div class="modal-actions">
+          <n-button @click="showRegenerate = false">取消</n-button>
+          <n-button type="primary" :loading="regenerating" @click="submitRegenerate">
+            开始重新生成
+          </n-button>
+        </div>
+      </n-space>
     </n-modal>
   </article>
 </template>
@@ -163,6 +205,18 @@ function updateBulletText(bulletId: string, text: string) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.slide-error {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #fecaca;
+  background: #fff5f5;
+  color: #b42318;
+  font-size: 13px;
 }
 .title-inline {
   flex: 1;
@@ -279,15 +333,20 @@ textarea.field-input {
   background: #d0e4ff;
 }
 
-/* Two column */
-.two-col {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
+.speaker-notes-input {
+  min-height: 120px;
 }
 
-.field-col {
-  min-width: 0;
+.visual-input {
+  min-height: 56px;
+}
+
+.speaker-notes-text {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f7f9fc;
+  line-height: 1.65;
+  color: #334155;
 }
 
 /* Evidence button */
@@ -332,6 +391,12 @@ textarea.field-input {
   overflow-y: auto;
 }
 
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .ev-card {
   padding: 10px 12px;
   border: 1px solid #e3e8f0;
@@ -372,6 +437,11 @@ textarea.field-input {
   font-size: 13px;
   color: #5d6b82;
   margin: 2px 0;
+}
+
+.hint-multiline {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 button.small {

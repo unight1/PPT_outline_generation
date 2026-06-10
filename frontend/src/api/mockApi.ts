@@ -1,7 +1,10 @@
 import type {
+  Chapter,
+  DocumentUploadResponse,
   CreateTaskRequest,
   CreateTaskResponse,
   GenerateSlidesRequest,
+  ListTasksResponse,
   Outline,
   OutlineSkeletonSlide,
   RegenerateSlideRequest,
@@ -14,6 +17,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 let currentTask: Task | null = null
 let pollCount = 0
+let uploadedCount = 0
 
 export async function createTask(
   request: CreateTaskRequest,
@@ -24,6 +28,46 @@ export async function createTask(
     ...mockTaskClarifying,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
+    input: {
+      topic: request.topic,
+      source_type: request.source_type ?? 'short_topic',
+      retrieval_depth: request.retrieval_depth ?? 'L1',
+      target_pages_min: request.target_pages_min ?? 8,
+      target_pages_max: request.target_pages_max ?? 12,
+      desired_chapters: request.desired_chapters,
+      document_title: request.document_title,
+      document_profile:
+        request.source_type === 'long_document'
+          ? {
+              summary: 'Mock 文档摘要：已识别长文档主题与核心观点。',
+              key_points: ['核心问题', '方案路径', '预期价值'],
+              char_count: request.document_text?.length ?? 0,
+            }
+          : null,
+      attachments:
+        request.source_type === 'long_document' && request.document_text?.trim()
+          ? [
+              {
+                document_id: 'doc_mock_body',
+                filename: `${request.document_title || 'document'}.md`,
+                status: 'ready',
+                chunk_count: 3,
+              },
+            ]
+          : [],
+    },
+    runtime: {
+      document_analysis_status:
+        request.source_type === 'long_document' ? 'done' : null,
+      retrieval_policy: {
+        retrieval_depth: request.retrieval_depth ?? 'L1',
+        tavily_enabled: true,
+        prefer_user_doc: request.source_type === 'long_document',
+        source_quality: 'medium',
+        force_refresh: false,
+        enable_fallback_deepen: false,
+      },
+    },
   }
 
   console.log('Mock create task request:', request)
@@ -37,6 +81,32 @@ export async function createTask(
 
 export async function getTask(taskId: string): Promise<Task> {
   await sleep(600)
+
+  if (taskId === 'mock-history-1') {
+    currentTask = {
+      ...mockTaskDone,
+      task_id: taskId,
+      created_at: new Date(Date.now() - 7200_000).toISOString(),
+      updated_at: new Date(Date.now() - 3600_000).toISOString(),
+      input: {
+        topic: '历史任务示例',
+        source_type: 'short_topic',
+        retrieval_depth: 'L1',
+        attachments: [],
+      },
+      runtime: {
+        retrieval_policy: {
+          retrieval_depth: 'L1',
+          tavily_enabled: true,
+          prefer_user_doc: false,
+          source_quality: 'medium',
+          force_refresh: false,
+          enable_fallback_deepen: false,
+        },
+      },
+    }
+    return currentTask
+  }
 
   if (!currentTask || currentTask.task_id !== taskId) {
     throw new Error('任务不存在')
@@ -135,6 +205,64 @@ export async function getTask(taskId: string): Promise<Task> {
   return currentTask
 }
 
+export async function listTasks(): Promise<ListTasksResponse> {
+  await sleep(300)
+  const tasks = currentTask
+    ? [
+        {
+          task_id: currentTask.task_id,
+          status: currentTask.status,
+          updated_at: currentTask.updated_at,
+          created_at: currentTask.created_at,
+          input: {
+            topic: currentTask.input?.topic ?? '当前 Mock 任务',
+            source_type: currentTask.input?.source_type ?? 'short_topic',
+          },
+        },
+        {
+          task_id: 'mock-history-1',
+          status: 'done' as const,
+          updated_at: new Date(Date.now() - 3600_000).toISOString(),
+          input: { topic: '历史任务示例', source_type: 'short_topic' as const },
+        },
+      ]
+    : [
+        {
+          task_id: 'mock-history-1',
+          status: 'done' as const,
+          updated_at: new Date(Date.now() - 3600_000).toISOString(),
+          input: { topic: '历史任务示例', source_type: 'short_topic' as const },
+        },
+      ]
+  return { tasks, total: tasks.length }
+}
+
+export async function uploadTaskDocument(
+  taskId: string,
+  file: File,
+): Promise<DocumentUploadResponse> {
+  await sleep(500)
+  if (!currentTask || currentTask.task_id !== taskId) {
+    throw new Error('任务不存在')
+  }
+  uploadedCount += 1
+  const attachment = {
+    document_id: `mock_doc_${uploadedCount}`,
+    filename: file.name,
+    status: 'ready' as const,
+    chunk_count: 3,
+  }
+  currentTask = {
+    ...currentTask,
+    input: {
+      ...(currentTask.input ?? {}),
+      attachments: [...(currentTask.input?.attachments ?? []), attachment],
+    },
+    updated_at: new Date().toISOString(),
+  }
+  return attachment
+}
+
 export async function submitClarification(
   taskId: string,
   answers: Record<string, string>,
@@ -188,7 +316,7 @@ export async function generateOutline(taskId: string): Promise<Task> {
 }
 
 function buildMockSkeleton(): OutlineSkeletonSlide[] {
-  return [
+  const base = [
     {
       slide_id: 's1',
       title: '问题背景与目标',
@@ -220,6 +348,17 @@ function buildMockSkeleton(): OutlineSkeletonSlide[] {
       user_notes: null,
     },
   ]
+  const minPages = Number(currentTask?.input?.target_pages_min ?? base.length)
+  const maxPages = Number(currentTask?.input?.target_pages_max ?? minPages)
+  const targetPages = Math.floor((minPages + maxPages) / 2)
+  return Array.from({ length: Math.max(3, Math.min(30, targetPages)) }, (_, index) => (
+    base[index] ?? {
+      slide_id: `s${index + 1}`,
+      title: `补充页面 ${index + 1}`,
+      intent: '补充说明前面结构中尚未覆盖的内容',
+      user_notes: null,
+    }
+  ))
 }
 
 export async function generateSkeleton(taskId: string): Promise<Task> {
@@ -249,6 +388,7 @@ export async function generateSkeleton(taskId: string): Promise<Task> {
 export async function updateSkeleton(
   taskId: string,
   slides: OutlineSkeletonSlide[],
+  chapters?: Chapter[],
 ): Promise<Task> {
   await sleep(600)
 
@@ -259,6 +399,7 @@ export async function updateSkeleton(
   currentTask = {
     ...currentTask,
     outline_skeleton: slides,
+    outline_skeleton_chapters: chapters ?? currentTask.outline_skeleton_chapters,
     updated_at: new Date().toISOString(),
     progress: {
       phase: 'skeleton_ready',
@@ -309,6 +450,17 @@ export async function generateSlides(
     status: 'generating',
     error: null,
     updated_at: new Date().toISOString(),
+    runtime: {
+      ...(currentTask.runtime ?? {}),
+      retrieval_policy: {
+        retrieval_depth: options?.retrieval_policy?.retrieval_depth ?? options?.retrieval_depth ?? 'L1',
+        tavily_enabled: options?.retrieval_policy?.tavily_enabled ?? options?.tavily_enabled ?? true,
+        prefer_user_doc: options?.retrieval_policy?.prefer_user_doc ?? false,
+        source_quality: options?.retrieval_policy?.source_quality ?? 'medium',
+        force_refresh: options?.retrieval_policy?.force_refresh ?? options?.force_refresh ?? false,
+        enable_fallback_deepen: options?.retrieval_policy?.enable_fallback_deepen ?? false,
+      },
+    },
     outline: {
       title: currentTask.outline?.title ?? 'Mock PPT Outline',
       slides: [],

@@ -5,6 +5,10 @@ const useMock = import.meta.env.VITE_USE_MOCK_API === 'true'
 
 export const createTask = useMock ? mockApi.createTask : httpApi.createTask
 export const getTask = useMock ? mockApi.getTask : httpApi.getTask
+export const listTasks = useMock ? mockApi.listTasks : httpApi.listTasks
+export const uploadTaskDocument = useMock
+  ? mockApi.uploadTaskDocument
+  : httpApi.uploadTaskDocument
 export const submitClarification = useMock
   ? mockApi.submitClarification
   : httpApi.submitClarification
