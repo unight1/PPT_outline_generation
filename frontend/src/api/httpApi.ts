@@ -1,11 +1,15 @@
 import type {
+  Chapter,
   CreateTaskRequest,
   CreateTaskResponse,
+  DocumentUploadResponse,
   GenerateSlidesRequest,
+  ListTasksResponse,
   Outline,
   OutlineSkeletonSlide,
   RegenerateSlideRequest,
   RegenerateSlideResponse,
+  RetrievalDepth,
   Task,
 } from '../types/task'
 
@@ -17,6 +21,14 @@ type ApiProblem = {
   }
 }
 
+function normalizeRetrievalDepth(value: unknown): RetrievalDepth {
+  if (value === 'L0' || value === 'L1' || value === 'L2') return value
+  const text = String(value ?? '').toUpperCase()
+  if (text.endsWith('.L0') || text.endsWith('L0')) return 'L0'
+  if (text.endsWith('.L2') || text.endsWith('L2')) return 'L2'
+  return 'L1'
+}
+
 async function parseError(response: Response): Promise<never> {
   let message = `请求失败（HTTP ${response.status}）`
 
@@ -24,6 +36,14 @@ async function parseError(response: Response): Promise<never> {
     const data = (await response.json()) as ApiProblem
     if (data?.error?.message) {
       message = data.error.message
+    }
+    const errors = data?.error?.details?.errors
+    if (Array.isArray(errors) && errors.length > 0) {
+      const first = errors[0] as { loc?: unknown[]; msg?: string }
+      const location = Array.isArray(first.loc) ? first.loc.join('.') : ''
+      if (first.msg) {
+        message = `${message} ${location ? `[${location}] ` : ''}${first.msg}`
+      }
     }
   } catch {
     // Keep fallback message when body is not JSON.
@@ -48,6 +68,19 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
+async function uploadJson<T>(url: string, formData: FormData): Promise<T> {
+  const response = await fetch(url, {
+    method: 'POST',
+    body: formData,
+  })
+
+  if (!response.ok) {
+    return parseError(response)
+  }
+
+  return (await response.json()) as T
+}
+
 export async function createTask(
   request: CreateTaskRequest,
 ): Promise<CreateTaskResponse> {
@@ -59,6 +92,22 @@ export async function createTask(
 
 export async function getTask(taskId: string): Promise<Task> {
   return requestJson<Task>(`/api/tasks/${taskId}`)
+}
+
+export async function listTasks(limit = 10): Promise<ListTasksResponse> {
+  return requestJson<ListTasksResponse>(`/api/tasks?limit=${limit}`)
+}
+
+export async function uploadTaskDocument(
+  taskId: string,
+  file: File,
+): Promise<DocumentUploadResponse> {
+  const formData = new FormData()
+  formData.append('file', file)
+  return uploadJson<DocumentUploadResponse>(
+    `/api/tasks/${taskId}/documents/upload`,
+    formData,
+  )
 }
 
 export async function submitClarification(
@@ -107,10 +156,18 @@ export async function generateSkeleton(taskId: string): Promise<Task> {
 export async function updateSkeleton(
   taskId: string,
   slides: OutlineSkeletonSlide[],
+  chapters?: Chapter[],
 ): Promise<Task> {
+  const sanitizedSlides = slides.map((slide) => ({
+    slide_id: slide.slide_id,
+    title: slide.title,
+    intent: slide.intent ?? null,
+    user_notes: slide.user_notes ?? null,
+    chapter_id: slide.chapter_id ?? null,
+  }))
   return requestJson<Task>(`/api/tasks/${taskId}/skeleton`, {
     method: 'PATCH',
-    body: JSON.stringify({ slides }),
+    body: JSON.stringify({ slides: sanitizedSlides, chapters }),
   })
 }
 
@@ -118,11 +175,29 @@ export async function generateSlides(
   taskId: string,
   options?: GenerateSlidesRequest,
 ): Promise<Task> {
+  const policy = options?.retrieval_policy
+  const depth = normalizeRetrievalDepth(policy?.retrieval_depth ?? options?.retrieval_depth)
+  const payload: GenerateSlidesRequest = {
+    concurrency: options?.concurrency,
+    force_refresh: Boolean(options?.force_refresh),
+    retrieval_depth: depth,
+    tavily_enabled: options?.tavily_enabled,
+    retrieval_policy: policy
+      ? {
+          retrieval_depth: depth,
+          tavily_enabled: policy.tavily_enabled,
+          prefer_user_doc: policy.prefer_user_doc,
+          source_quality: policy.source_quality,
+          force_refresh: policy.force_refresh,
+          enable_fallback_deepen: policy.enable_fallback_deepen,
+        }
+      : undefined,
+  }
   const result = await requestJson<{ task_id: string; status: Task['status'] }>(
     `/api/tasks/${taskId}/slides/generate`,
     {
       method: 'POST',
-      body: JSON.stringify(options ?? {}),
+      body: JSON.stringify(payload),
     },
   )
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { Task } from '../types/task'
 import SlidePanel from './SlidePanel.vue'
 
@@ -36,10 +36,6 @@ const progressMessage = computed(() => {
       (failed.value > 0 ? `，${failed.value} 页失败` : '')
   )
 })
-</script>
-
-<script lang="ts">
-import { ref } from 'vue'
 </script>
 
 <template>
@@ -91,6 +87,10 @@ import { ref } from 'vue'
       <!-- Selected page preview -->
       <div class="preview-section">
         <template v-if="selectedSlide?.slide">
+          <div v-if="selectedSlide.status === 'failed'" class="page-error">
+            <strong>这一页生成失败</strong>
+            <span>{{ selectedSlide.slide.error?.message || '可稍后回到骨架页重新生成。' }}</span>
+          </div>
           <SlidePanel
             :slide="selectedSlide.slide"
             :index="selectedSlide.index"
@@ -297,6 +297,19 @@ import { ref } from 'vue'
   border-radius: 12px;
   padding: 16px;
   text-align: center;
+}
+
+.page-error {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  background: #fff5f5;
+  color: #b42318;
+  font-size: 13px;
 }
 
 .dialog-footer {

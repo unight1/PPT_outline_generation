@@ -6,9 +6,13 @@ export type TaskStatus =
   | 'failed'
 
 export type RetrievalDepth = 'L0' | 'L1' | 'L2'
+export type SourceQuality = 'low' | 'medium' | 'high'
+export type AttachmentStatus = 'pending' | 'ready' | 'failed'
+export type DocumentAnalysisStatus = 'pending' | 'running' | 'done' | 'failed'
 
 export type WorkflowPhase =
   | 'idle'
+  | 'document_analysis'
   | 'skeleton_llm'
   | 'skeleton_ready'
   | 'retrieving_page'
@@ -24,6 +28,10 @@ export interface CreateTaskRequest {
   source_type?: 'short_topic' | 'long_document'
   audience?: string
   duration_minutes?: number
+  target_pages?: number
+  target_pages_min?: number
+  target_pages_max?: number
+  desired_chapters?: string
   language?: string
   retrieval_depth?: RetrievalDepth
   raw_notes?: string
@@ -60,11 +68,61 @@ export interface Progress {
   failed?: number
 }
 
+export interface DocumentProfile {
+  summary?: string
+  key_points?: string[]
+  suggested_focus?: string | null
+  segments?: string[]
+  segment_count?: number
+  char_count?: number
+  keywords?: string[]
+  [key: string]: unknown
+}
+
+export interface Attachment {
+  document_id: string
+  filename: string
+  status: AttachmentStatus
+  chunk_count: number | null
+}
+
+export interface RetrievalPolicy {
+  retrieval_depth?: RetrievalDepth
+  tavily_enabled?: boolean
+  prefer_user_doc?: boolean
+  source_quality?: SourceQuality
+  force_refresh?: boolean
+  enable_fallback_deepen?: boolean
+}
+
+export interface TaskRuntime {
+  document_analysis_status?: DocumentAnalysisStatus | null
+  retrieval_policy?: RetrievalPolicy | null
+  [key: string]: unknown
+}
+
+export interface TaskInput {
+  topic?: string
+  source_type?: 'short_topic' | 'long_document'
+  retrieval_depth?: RetrievalDepth
+  document_title?: string | null
+  document_profile?: DocumentProfile | null
+  attachments?: Attachment[]
+  [key: string]: unknown
+}
+
 export interface OutlineSkeletonSlide {
   slide_id: string
   title: string
   intent: string | null
   user_notes: string | null
+  chapter_id?: string | null
+}
+
+export interface Chapter {
+  chapter_id: string
+  title: string
+  slide_ids: string[]
 }
 
 export interface Bullet {
@@ -76,11 +134,17 @@ export interface Bullet {
 export interface Slide {
   slide_id: string
   title: string
+  chapter_id?: string | null
   key_message?: string | null        // B1: 本页核心结论一句话
   bullets: Bullet[]
   speaker_notes: string | null
   visual_suggestion?: string | null  // B1: 建议配图/图表类型
   takeaway?: string | null           // B1: 听众行动建议或关键启示
+  generation_status?: 'done' | 'failed'
+  error?: {
+    code?: string
+    message?: string
+  }
 }
 
 export interface Evidence {
@@ -95,6 +159,7 @@ export interface Evidence {
 export interface Outline {
   title: string
   slides: Slide[]
+  chapters?: Chapter[]
   evidence_catalog: Evidence[]
   page_evidence_map?: Array<{
     slide_id: string
@@ -123,9 +188,12 @@ export interface Task {
   updated_at: string
   clarification: Clarification | null
   outline_skeleton: OutlineSkeletonSlide[] | null
+  outline_skeleton_chapters?: Chapter[] | null
   outline: Outline | null
   progress: Progress | null
   error: TaskError | null
+  input?: TaskInput
+  runtime?: TaskRuntime | null
 }
 
 export interface RegenerateSlideRequest {
@@ -144,6 +212,31 @@ export interface GenerateSlidesRequest {
   force_refresh?: boolean
   retrieval_depth?: RetrievalDepth
   tavily_enabled?: boolean
+  retrieval_policy?: RetrievalPolicy
+}
+
+export interface TaskListItem {
+  task_id: string
+  status: TaskStatus
+  updated_at: string
+  created_at?: string
+  input?: {
+    topic?: string
+    source_type?: 'short_topic' | 'long_document'
+    [key: string]: unknown
+  }
+}
+
+export interface ListTasksResponse {
+  tasks: TaskListItem[]
+  total: number
+}
+
+export interface DocumentUploadResponse {
+  document_id: string
+  filename: string
+  status: AttachmentStatus
+  chunk_count: number | null
 }
 
 export type SlideGenerationErrorCode =

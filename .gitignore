@@ -47,3 +47,6 @@ reports/
 
 docs/others/
 docs/exp/
+
+backend/task_chroma_data/
+backend/task_documents/

@@ -101,3 +101,56 @@ def test_generate_skeleton_falls_back_without_api_key(monkeypatch) -> None:  # t
     assert all(len(ch.get("slide_ids", [])) > 0 for ch in chapters)
     all_ch_slide_ids = [sid for ch in chapters for sid in ch.get("slide_ids", [])]
     assert set(all_ch_slide_ids) == {s["slide_id"] for s in slides}
+
+
+def test_generate_skeleton_uses_page_range_and_desired_chapters(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(skeleton.settings, "use_real_llm", False)
+    task = _task("6 页")
+    task["input"]["target_pages_min"] = 6
+    task["input"]["target_pages_max"] = 10
+    task["input"]["desired_chapters"] = "背景, 方案, 验证, 总结"
+
+    result = skeleton.generate_outline_skeleton(task)
+
+    assert len(result["slides"]) == 8
+    assert [chapter["title"] for chapter in result["chapters"]] == ["背景", "方案", "验证", "总结"]
+
+
+def test_normalize_skeleton_maps_model_slide_ids_to_chapters() -> None:
+    raw = {
+        "chapters": [
+            {"chapter_id": "c_background", "title": "背景分析", "slide_ids": ["intro", "problem"]},
+            {"chapter_id": "c_solution", "title": "方案设计", "slide_ids": ["solution"]},
+        ],
+        "slides": [
+            {"slide_id": "intro", "title": "引入", "intent": "说明背景", "user_notes": ""},
+            {"slide_id": "problem", "title": "问题", "intent": "说明问题", "user_notes": ""},
+            {"slide_id": "solution", "title": "方案", "intent": "说明方案", "user_notes": ""},
+        ],
+    }
+
+    result = skeleton._normalize_skeleton(raw, "主题", 3)
+
+    assert [slide["slide_id"] for slide in result["slides"]] == ["s1", "s2", "s3"]
+    assert result["chapters"][0]["title"] == "背景分析"
+    assert result["chapters"][0]["slide_ids"] == ["s1", "s2"]
+    assert result["chapters"][1]["slide_ids"] == ["s3"]
+
+
+def test_normalize_skeleton_accepts_sections_alias() -> None:
+    raw = {
+        "sections": [
+            {"section_id": "sec1", "name": "背景", "slides": ["a"]},
+            {"section_id": "sec2", "name": "总结", "slides": ["b"]},
+        ],
+        "slides": [
+            {"slide_id": "a", "title": "第一页", "intent": "背景", "user_notes": ""},
+            {"slide_id": "b", "title": "第二页", "intent": "总结", "user_notes": ""},
+        ],
+    }
+
+    result = skeleton._normalize_skeleton(raw, "主题", 2)
+
+    assert result["chapters"][0]["chapter_id"] == "sec1"
+    assert result["chapters"][0]["title"] == "背景"
+    assert result["chapters"][1]["slide_ids"] == ["s2"]

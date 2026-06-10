@@ -231,6 +231,22 @@ def test_generate_slides_merges_and_persists_retrieval_policy() -> None:
     assert tasks_route.TASK_STORE[task_id]["input"]["retrieval_depth"] == "L2"
 
 
+def test_merge_retrieval_policy_normalizes_legacy_enum_string() -> None:
+    task = {
+        "input": {"retrieval_depth": "RetrievalDepth.l0"},
+        "runtime": {
+            "retrieval_policy": {
+                "retrieval_depth": "RetrievalDepth.l2",
+                "tavily_enabled": True,
+            }
+        },
+    }
+
+    policy = tasks_route.merge_retrieval_policy(task)
+
+    assert policy["retrieval_depth"] == "L2"
+
+
 def test_patch_skeleton_after_failed_resets_to_pending() -> None:
     client = TestClient(app)
     create = client.post("/api/tasks", json={"topic": "AI PPT", "retrieval_depth": "L0"}).json()
@@ -252,6 +268,69 @@ def test_patch_skeleton_after_failed_resets_to_pending() -> None:
     assert body["error"] is None
     assert body["outline_skeleton"][0]["title"] == "重试页"
     assert body["progress"]["phase"] == "skeleton_ready"
+
+
+def test_patch_skeleton_updates_chapters() -> None:
+    client = TestClient(app)
+    create = client.post("/api/tasks", json={"topic": "AI PPT", "retrieval_depth": "L0"}).json()
+    task_id = create["task_id"]
+    task = tasks_route.TASK_STORE[task_id]
+    task["status"] = "pending"
+    task["clarification"]["submitted"] = True
+    task["outline_skeleton"] = [
+        {"slide_id": "s1", "title": "背景", "intent": "", "user_notes": "", "chapter_id": "ch1"},
+        {"slide_id": "s2", "title": "方案", "intent": "", "user_notes": "", "chapter_id": "ch1"},
+    ]
+    task["outline_skeleton_chapters"] = [
+        {"chapter_id": "ch1", "title": "旧章节", "slide_ids": ["s1", "s2"]},
+    ]
+
+    resp = client.patch(
+        f"/api/tasks/{task_id}/skeleton",
+        json={
+            "slides": [
+                {"slide_id": "s1", "title": "背景", "intent": "", "user_notes": "", "chapter_id": "ch1"},
+                {"slide_id": "s2", "title": "方案", "intent": "", "user_notes": "", "chapter_id": "ch2"},
+            ],
+            "chapters": [
+                {"chapter_id": "ch1", "title": "背景分析", "slide_ids": ["s1"]},
+                {"chapter_id": "ch2", "title": "方案设计", "slide_ids": ["s2"]},
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["outline_skeleton_chapters"][0]["title"] == "背景分析"
+    assert body["outline_skeleton_chapters"][1]["slide_ids"] == ["s2"]
+    assert body["outline_skeleton"][1]["chapter_id"] == "ch2"
+
+
+def test_task_snapshot_rebuilds_chapters_from_skeleton_slides() -> None:
+    task = {
+        "task_id": "t1",
+        "schema_version": "v1.1.0",
+        "status": "pending",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "input": {},
+        "clarification": {"questions": [], "submitted": True},
+        "outline_skeleton": [
+            {"slide_id": "s1", "title": "背景", "chapter_id": "ch1"},
+            {"slide_id": "s2", "title": "方案", "chapter_id": "ch2"},
+        ],
+        "outline": None,
+        "progress": None,
+        "error": None,
+        "runtime": {},
+    }
+
+    snapshot = tasks_route.task_snapshot(task)
+
+    assert snapshot["outline_skeleton_chapters"] == [
+        {"chapter_id": "ch1", "title": "章节：背景", "slide_ids": ["s1"]},
+        {"chapter_id": "ch2", "title": "章节：方案", "slide_ids": ["s2"]},
+    ]
 
 
 def test_patch_outline_merges_slides_and_rebuilds_evidence_map() -> None:
@@ -458,6 +537,96 @@ def test_long_document_builds_internal_document_profile() -> None:
     assert profile.get("segment_count", 0) > 0
     assert isinstance(profile.get("key_points"), list)
     assert isinstance(profile.get("keywords"), list)
+    attachments = stored["input"].get("attachments")
+    assert isinstance(attachments, list)
+    assert len(attachments) == 1
+    assert attachments[0]["status"] == "ready"
+    assert attachments[0]["chunk_count"] > 0
+
+
+def test_long_document_defers_clarification_until_analysis(monkeypatch) -> None:
+    settings.use_real_llm = True
+    settings.openai_api_key = "test-key"
+
+    def fake_enrich(**kwargs):
+        return {
+            "summary": "LLM 摘要内容",
+            "key_points": ["要点一", "要点二"],
+            "keywords": ["关键词"],
+        }
+
+    monkeypatch.setattr("app.api.routes.tasks.enrich_document_profile", fake_enrich)
+
+    submitted_jobs: list[tuple[object, str]] = []
+
+    def capture_submit(fn, task_id: str) -> Future[None]:
+        submitted_jobs.append((fn, task_id))
+        return _done_future()
+
+    monkeypatch.setattr(tasks_route.GENERATION_EXECUTOR, "submit", capture_submit)
+
+    client = TestClient(app)
+    resp = client.post(
+        "/api/tasks",
+        json={
+            "topic": "延迟澄清测试",
+            "source_type": "long_document",
+            "document_text": "长文档正文 " * 100,
+            "document_title": "测试文档",
+            "retrieval_depth": "L1",
+        },
+    )
+    assert resp.status_code == 201
+    task_id = resp.json()["task_id"]
+
+    task = client.get(f"/api/tasks/{task_id}").json()
+    assert task["clarification"]["questions"] == []
+    assert task["runtime"]["document_analysis_status"] == "running"
+    assert task["progress"]["phase"] == "document_analysis"
+    assert len(submitted_jobs) == 1
+
+    patch_resp = client.patch(
+        f"/api/tasks/{task_id}/clarification",
+        json={"answers": [], "submitted": False},
+    )
+    assert patch_resp.status_code == 409
+
+    enrich_fn, enrich_task_id = submitted_jobs[0]
+    enrich_fn(enrich_task_id)
+
+    task = client.get(f"/api/tasks/{task_id}").json()
+    assert task["runtime"]["document_analysis_status"] == "done"
+    assert len(task["clarification"]["questions"]) >= 3
+    assert task["input"]["document_profile"]["summary"] == "LLM 摘要内容"
+
+
+def test_long_document_persists_body_for_task_rag(tmp_path) -> None:
+    old_docs_dir = settings.task_documents_dir
+    settings.task_documents_dir = str(tmp_path / "docs")
+    try:
+        client = TestClient(app)
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "topic": "长文档 RAG",
+                "source_type": "long_document",
+                "document_text": "专有名词 AlphaBetaX 只能来自上传文档。\n" * 40,
+                "document_title": "课堂笔记",
+                "retrieval_depth": "L1",
+            },
+        )
+        assert resp.status_code == 201
+        task_id = resp.json()["task_id"]
+        task = client.get(f"/api/tasks/{task_id}").json()
+        attachments = task["input"].get("attachments")
+        assert isinstance(attachments, list)
+        assert len(attachments) == 1
+        assert attachments[0]["filename"] == "课堂笔记.md"
+        assert attachments[0]["status"] == "ready"
+        assert attachments[0]["chunk_count"] > 0
+        assert len(task["clarification"]["questions"]) >= 3
+    finally:
+        settings.task_documents_dir = old_docs_dir
 
 
 def test_upload_task_document_updates_attachments(tmp_path) -> None:
