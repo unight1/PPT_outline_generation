@@ -599,17 +599,18 @@ def _build_page_prompt(
     {{"bullet_id": "{slide_id}-b1", "text": "要点：含关键信息、依据或例子，单条约 40～80 字"}}
   ],
   "speaker_notes": "讲者备注：4～6 句可讲述话术，含本页展开顺序与过渡到下页",
-  "visual_suggestion": "建议配图或图表类型（如：柱状图对比、流程图、示意图），若无必要可填null",
-  "takeaway": "页级小结：1～2 句行动建议或启示（背景页可填 null）"
+  "visual_suggestion": "建议配图或图表类型（必须给出，如：柱状图对比、流程图、示意图）",
+  "takeaway": "页级小结：1～2 句行动建议或启示（必须给出，背景页也需写一句话）"
 }}
 
 硬性要求：
 1) bullets 至少 2 个，最多 6 个；每条 bullet 只含 bullet_id 与 text，不要填写证据编号字段；
 2) 每条 bullet 的 text 必须具体、可讲，避免「加强XX」「提升YY」等空话；有参考资料时融入事实、数据或案例表述；
-3) key_message 必须输出非空字符串，与 bullets 内容一致、可独立读懂；
-4) 要点内容若来自参考资料，在 text 中自然表述即可；证据引用由系统在生成后自动绑定；
-5) 如果“本次重新生成要求”非空，必须优先满足它；如果它和原页面目标冲突，以本次要求为准；
-6) 不要输出 Markdown，不要输出解释文字，只输出 JSON。"""
+3) key_message、visual_suggestion、takeaway 三个字段都必须是真实的中文内容，不允许为 null 或空字符串；
+4) visual_suggestion 必须写具体的图表/配图建议，如 "柱状图对比近三年数据"、"流程图展示审批过程"；
+5) 要点内容若来自参考资料，在 text 中自然表述即可；证据引用由系统在生成后自动绑定；
+6) 如果"本次重新生成要求"非空，必须优先满足它；如果它和原页面目标冲突，以本次要求为准；
+7) 不要输出 Markdown，不要输出解释文字，只输出 JSON。"""
 
 
 def _extract_json_object(content: str) -> dict:
@@ -738,8 +739,8 @@ def _stub_page(slide: dict) -> dict:
             {"bullet_id": f"{slide_id}-b2", "text": "待补充要点", "evidence_ids": []},
         ],
         "speaker_notes": "",
-        "visual_suggestion": None,
-        "takeaway": None,
+        "visual_suggestion": "柱状图或流程图（待生成）",
+        "takeaway": "待生成",
     }
 
 
