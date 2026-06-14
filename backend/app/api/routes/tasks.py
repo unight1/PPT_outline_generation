@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from app.config import settings
@@ -21,6 +22,7 @@ from app.services.clarification import build_clarification_questions, build_fall
 from app.services.document_llm import enrich_document_profile, merge_enrichment_into_profile
 from app.services.document_processing import build_document_profile
 from app.services.generation import should_force_fail
+from app.services.pptx_export import export_outline_to_pptx
 from app.services.orchestration import generate_outline_with_research
 from app.services.page_generation import SlideWorkflowError, generate_pages_from_skeleton
 from app.services.skeleton import generate_outline_skeleton
@@ -1692,3 +1694,23 @@ def regenerate_slide(task_id: UUID, slide_id: str, payload: RegenerateSlideReque
     persist_task(task)
     enqueue_regenerate_slide(task_id_str, slide_id, user_instruction)
     return {"task_id": task_id_str, "status": TaskStatus.generating.value, "accepted": True, "slide_id": slide_id}
+
+
+@router.get("/{task_id:uuid}/export/pptx")
+def export_task_pptx(task_id: UUID) -> StreamingResponse:
+    task_id_str = str(task_id)
+    validate_task_id(task_id_str)
+    task = get_task_or_404(task_id_str)
+    outline = task.get("outline")
+    if not isinstance(outline, dict) or not outline.get("slides"):
+        raise build_error(status.HTTP_409_CONFLICT, "INVALID_STATE", "Outline has not been generated yet.")
+
+    pptx_bytes = export_outline_to_pptx(outline)
+    safe_title = str(outline.get("title") or task_id_str)[:40]
+    filename = f"{safe_title}.pptx"
+
+    return StreamingResponse(
+        content=iter([pptx_bytes]),
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

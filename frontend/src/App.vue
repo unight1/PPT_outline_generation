@@ -966,6 +966,26 @@ function handleDownloadMarkdown() {
   URL.revokeObjectURL(url)
 }
 
+async function handleDownloadPPTX() {
+  if (!task.value) return
+  const token = localStorage.getItem('access_token')
+  const resp = await fetch(`/api/tasks/${task.value.task_id}/export/pptx`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}))
+    errorMessage.value = (body as { error?: { message?: string } })?.error?.message ?? '导出 PPTX 失败'
+    return
+  }
+  const blob = await resp.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `${task.value.outline?.title || 'outline'}.pptx`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { slides: (infer S)[] } | null ? S : never) {
   if (!outlineDraft.value) return
   outlineDraft.value = {
@@ -1394,6 +1414,7 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
               @click="handleSaveOutline">保存修改</n-button>
             <n-button v-if="view === 'result'" @click="handleCopyMarkdown" secondary>复制 Markdown</n-button>
             <n-button v-if="view === 'result'" @click="handleDownloadMarkdown" secondary>下载 .md</n-button>
+            <n-button v-if="view === 'result'" @click="handleDownloadPPTX" secondary>下载 .pptx</n-button>
           </div>
         </div>
       </div>
