@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     task_documents_dir: str = "./task_documents"
     task_documents_chroma_dir: str = "./task_chroma_data"
     task_document_upload_max_bytes: int = 2_000_000
+    jwt_secret: str = "dev-secret-change-in-production"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 480
 
 
 settings = Settings()
