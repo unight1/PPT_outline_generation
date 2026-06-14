@@ -1,28 +1,45 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from pydantic import BaseModel
 
 from app.config import settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer(auto_error=False)
+
+
+def _hash_password(password: str, salt: str = "") -> tuple[str, str]:
+    if not salt:
+        salt = secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
+    return salt + ":" + dk.hex(), salt
+
+
+def _verify_password(plain: str, stored: str) -> bool:
+    salt = stored.split(":", 1)[0]
+    hashed, _ = _hash_password(plain, salt)
+    return secrets.compare_digest(hashed, stored)
+
+
+_ADMIN_HASH, _ = _hash_password("admin123")
+_USER_HASH, _ = _hash_password("user123")
 
 PRESET_USERS: dict[str, dict[str, Any]] = {
     "admin": {
         "username": "admin",
-        "hashed_password": pwd_context.hash("admin123"),
+        "hashed_password": _ADMIN_HASH,
         "role": "admin",
     },
     "user": {
         "username": "user",
-        "hashed_password": pwd_context.hash("user123"),
+        "hashed_password": _USER_HASH,
         "role": "user",
     },
 }
@@ -66,7 +83,7 @@ def authenticate_user(username: str, password: str) -> dict[str, Any] | None:
     user = PRESET_USERS.get(username)
     if not user:
         return None
-    if not verify_password(password, user["hashed_password"]):
+    if not _verify_password(password, user["hashed_password"]):
         return None
     return user
 
