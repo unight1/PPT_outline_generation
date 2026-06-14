@@ -1029,10 +1029,10 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
 
 
 <template>
-  <LoginView v-if="!loggedIn" @logged-in="handleLoggedIn" />
-  <n-config-provider v-else :theme-overrides="{ common: { primaryColor: '#2864d8' } }">
+  <n-config-provider :theme-overrides="{ common: { primaryColor: '#2864d8' } }">
     <n-message-provider>
-      <div class="app-shell">
+      <LoginView v-if="!loggedIn" @logged-in="handleLoggedIn" />
+      <div v-else class="app-shell">
         <div class="app-topbar">
           <strong class="app-title">PPT Outline</strong>
           <n-steps :current="currentStep" size="small" class="header-steps">
