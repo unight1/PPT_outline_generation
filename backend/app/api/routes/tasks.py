@@ -1560,6 +1560,40 @@ def delete_task_endpoint(task_id: UUID) -> dict[str, str]:
     return {"deleted": task_id_str}
 
 
+@router.get("/stats/tokens")
+def token_usage_stats() -> dict[str, Any]:
+    if USE_DB_STORE:
+        tasks_list = db_list_tasks(limit=500)
+    else:
+        tasks_list = list(TASK_STORE.values())
+
+    total_prompt = 0
+    total_completion = 0
+    total_tokens = 0
+    tasks_with_usage = 0
+    for task in tasks_list:
+        outline = task.get("outline")
+        if not isinstance(outline, dict):
+            continue
+        meta = outline.get("meta")
+        if not isinstance(meta, dict):
+            continue
+        usage = meta.get("token_usage")
+        if not isinstance(usage, dict):
+            continue
+        total_prompt += int(usage.get("prompt_tokens", 0))
+        total_completion += int(usage.get("completion_tokens", 0))
+        total_tokens += int(usage.get("total_tokens", 0))
+        tasks_with_usage += 1
+
+    return {
+        "total_prompt_tokens": total_prompt,
+        "total_completion_tokens": total_completion,
+        "total_tokens": total_tokens,
+        "tasks_with_usage": tasks_with_usage,
+    }
+
+
 def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str | None = None) -> None:
     try:
         task = fetch_task(task_id)

@@ -674,6 +674,14 @@ def _generate_single_page(
         except Exception:
             response = client.chat.completions.create(**payload)
 
+        usage = getattr(response, "usage", None)
+        if usage:
+            slide["_usage"] = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(usage, "completion_tokens", 0),
+                "total_tokens": getattr(usage, "total_tokens", 0),
+            }
+
         content = response.choices[0].message.content or "{}"
         raw = _extract_json_object(content)
 
@@ -724,14 +732,36 @@ def _stub_page(slide: dict) -> dict:
     return {
         "slide_id": slide_id,
         "title": str(slide.get("title") or slide_id),
-        "key_message": str(slide.get("title") or slide_id),  # B1: 默认用标题作占位
+        "key_message": str(slide.get("title") or slide_id),
         "bullets": [
             {"bullet_id": f"{slide_id}-b1", "text": "待补充要点", "evidence_ids": []},
             {"bullet_id": f"{slide_id}-b2", "text": "待补充要点", "evidence_ids": []},
         ],
         "speaker_notes": "",
-        "visual_suggestion": None,  # B1: 可选字段，默认空
-        "takeaway": None,           # B1: 可选字段，默认空
+        "visual_suggestion": None,
+        "takeaway": None,
+    }
+
+
+def _collect_token_usage(page_results: dict[str, dict]) -> dict[str, int] | None:
+    prompt_total = 0
+    completion_total = 0
+    token_total = 0
+    pages_with_usage = 0
+    for page in page_results.values():
+        usage = page.get("_usage")
+        if isinstance(usage, dict):
+            prompt_total += int(usage.get("prompt_tokens", 0))
+            completion_total += int(usage.get("completion_tokens", 0))
+            token_total += int(usage.get("total_tokens", 0))
+            pages_with_usage += 1
+    if pages_with_usage == 0:
+        return None
+    return {
+        "prompt_tokens": prompt_total,
+        "completion_tokens": completion_total,
+        "total_tokens": token_total,
+        "pages_counted": pages_with_usage,
     }
 
 
@@ -1127,6 +1157,12 @@ def generate_pages_from_skeleton(
     outline["meta"]["failed_pages"] = failed_pages
     outline["meta"]["total_pages"] = total
     outline["meta"]["retrieval_policy"] = retrieval_policy
+
+    # Collect token usage across all successfully generated pages
+    token_usage = _collect_token_usage(page_results)
+    if token_usage:
+        outline["meta"]["token_usage"] = token_usage
+
     task["outline"] = outline
 
     # Phase 4: saving
