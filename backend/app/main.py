@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routes import health, tasks, auth
+from app.api.routes import eval as eval_routes
 from app.config import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -52,6 +53,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api")
 app.include_router(tasks.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
+app.include_router(eval_routes.router, prefix="/api")
 
 
 @app.on_event("startup")
