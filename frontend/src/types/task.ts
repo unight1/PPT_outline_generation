@@ -248,3 +248,21 @@ export type SlideGenerationErrorCode =
   | 'GENERATION_TIMEOUT'
   | 'RETRIEVAL_UNAVAILABLE'
   | string
+
+export interface EvalCase {
+  eval_id: string
+  topic: string
+  source_type: string
+  document_text: string | null
+  expected_depth: string
+  constraints: string[]
+  priority: string
+  status: string
+  task_id: string | null
+  score: number | null
+  evaluator: string | null
+  evidence_coverage: number | null
+  notes: string | null
+  created_at: string | null
+  updated_at: string | null
+}
