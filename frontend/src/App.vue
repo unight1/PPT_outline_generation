@@ -994,8 +994,8 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
             <n-step title="查看大纲" />
           </n-steps>
           <n-space :size="8" align="center">
-            <n-button v-if="currentPage === 'eval'" text size="small" @click="currentPage = 'workflow'">返回工作台</n-button>
-            <n-button v-else text size="small" @click="currentPage = 'eval'">评测</n-button>
+            <n-button v-if="currentUsername === 'admin' && currentPage === 'eval'" text size="small" @click="currentPage = 'workflow'">返回工作台</n-button>
+            <n-button v-if="currentUsername === 'admin' && currentPage === 'workflow'" text size="small" @click="currentPage = 'eval'">评测</n-button>
             <n-text depth="3" style="font-size:12px">{{ currentUsername }}</n-text>
             <n-button text size="small" @click="handleLogout">退出</n-button>
             <n-tag size="small" :bordered="false" type="info">{{ apiModeLabel }}</n-tag>
