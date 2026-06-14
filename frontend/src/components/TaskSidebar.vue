@@ -108,7 +108,7 @@ const hasAttachments = () => Boolean(props.task?.input?.attachments?.length)
       <label :class="['upload-box', { disabled: uploadDisabled || uploading }]">
         <input
           type="file"
-          accept=".txt,.md"
+          accept=".txt,.md,.pdf"
           :disabled="uploadDisabled || uploading"
           @change="onFileChange"
         />

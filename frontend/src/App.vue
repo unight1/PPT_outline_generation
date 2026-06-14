@@ -680,7 +680,7 @@ async function openTask(taskId: string) {
 
 function isSupportedDocumentFile(file: File) {
   const name = file.name.toLowerCase()
-  return name.endsWith('.txt') || name.endsWith('.md')
+  return name.endsWith('.txt') || name.endsWith('.md') || name.endsWith('.pdf')
 }
 
 async function handleLongDocumentFile(event: Event) {
@@ -690,7 +690,7 @@ async function handleLongDocumentFile(event: Event) {
   if (!file) return
 
   if (!isSupportedDocumentFile(file)) {
-    errorMessage.value = '仅支持上传 .txt 或 .md 文件'
+    errorMessage.value = '仅支持上传 .txt、.md 或 .pdf 文件'
     return
   }
   if (file.size > DOCUMENT_UPLOAD_MAX_BYTES) {
@@ -700,19 +700,36 @@ async function handleLongDocumentFile(event: Event) {
 
   readingLongDocument.value = true
   errorMessage.value = ''
+  longDocumentFileName.value = file.name
+
   try {
-    const text = await file.text()
+    let text: string
+    if (file.name.toLowerCase().endsWith('.pdf')) {
+      const formData = new FormData()
+      formData.append('file', file)
+      const token = localStorage.getItem('access_token')
+      const resp = await fetch('/api/utils/parse-pdf', {
+        method: 'POST',
+        body: formData,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}))
+        throw new Error((err as { error?: { message?: string } })?.error?.message ?? 'PDF 解析失败')
+      }
+      const data = (await resp.json()) as { text: string; pages: string }
+      text = data.text
+    } else {
+      text = await file.text()
+    }
     if (!text.trim()) {
       errorMessage.value = '上传的文档为空'
       return
     }
     form.document_text = text
-    longDocumentFileName.value = file.name
-    if (!(form.document_title ?? '').trim()) {
-      form.document_title = file.name.replace(/\.(txt|md)$/i, '')
-    }
-  } catch {
-    errorMessage.value = '读取文档失败，请重试'
+  } catch (err) {
+    errorMessage.value = err instanceof Error ? err.message : '读取文档失败'
+    longDocumentFileName.value = ''
   } finally {
     readingLongDocument.value = false
   }
@@ -1118,11 +1135,11 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
                   <label :class="['upload-box', { disabled: readingLongDocument }]">
                     <input
                       type="file"
-                      accept=".txt,.md"
+                      accept=".txt,.md,.pdf"
                       :disabled="readingLongDocument"
                       @change="handleLongDocumentFile"
                     />
-                    {{ readingLongDocument ? '正在读取文档…' : '上传 .txt / .md 作为正文' }}
+                    {{ readingLongDocument ? '正在读取文档…' : '上传 .txt / .md / .pdf 作为正文' }}
                   </label>
                   <n-text v-if="longDocumentFileName" depth="3" class="field-hint">
                     已选择：{{ longDocumentFileName }}

@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import health, tasks, auth
 from app.api.routes import eval as eval_routes
+from app.api.routes import utils as utils_routes
 from app.config import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -54,6 +55,7 @@ app.include_router(health.router, prefix="/api")
 app.include_router(tasks.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(eval_routes.router, prefix="/api")
+app.include_router(utils_routes.router, prefix="/api")
 
 
 @app.on_event("startup")
