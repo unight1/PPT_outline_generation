@@ -100,8 +100,10 @@ export async function getTask(taskId: string): Promise<Task> {
   return requestJson<Task>(`/api/tasks/${taskId}`)
 }
 
-export async function listTasks(limit = 10): Promise<ListTasksResponse> {
-  return requestJson<ListTasksResponse>(`/api/tasks?limit=${limit}`)
+export async function listTasks(limit = 10, search?: string): Promise<ListTasksResponse> {
+  let url = `/api/tasks?limit=${limit}`
+  if (search) url += `&search=${encodeURIComponent(search)}`
+  return requestJson<ListTasksResponse>(url)
 }
 
 export async function deleteTask(taskId: string): Promise<void> {

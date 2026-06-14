@@ -388,6 +388,22 @@ def persist_task(task: dict[str, Any]) -> None:
     TASK_STORE[task["task_id"]] = task
 
 
+def _task_matches_search(task: dict[str, Any], keyword: str) -> bool:
+    input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
+    topic = str(input_data.get("topic") or "").lower()
+    if keyword in topic:
+        return True
+    title = str(input_data.get("document_title") or "").lower()
+    if keyword in title:
+        return True
+    outline = task.get("outline")
+    if isinstance(outline, dict):
+        outline_title = str(outline.get("title") or "").lower()
+        if keyword in outline_title:
+            return True
+    return False
+
+
 def _clarification_payload_from_task(task: dict[str, Any]) -> CreateTaskRequest:
     input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
     duration = input_data.get("duration_minutes")
@@ -829,18 +845,28 @@ async def upload_task_document(task_id: UUID, file: UploadFile = File(...)) -> D
 
 
 @router.get("", response_model=ListTasksResponse)
-def list_tasks(status_filter: TaskStatus | None = None, limit: int = 20) -> ListTasksResponse:
+def list_tasks(
+    status_filter: TaskStatus | None = None,
+    search: str | None = None,
+    limit: int = 20,
+) -> ListTasksResponse:
     limit = max(1, min(limit, 200))
     if USE_DB_STORE:
-        tasks = db_list_tasks(limit=limit)
+        tasks_list = db_list_tasks(limit=500)
     else:
-        tasks = list(TASK_STORE.values())
-        tasks.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
-        tasks = tasks[:limit]
+        tasks_list = list(TASK_STORE.values())
+        tasks_list.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
 
     if status_filter is not None:
-        tasks = [task for task in tasks if task.get("status") == status_filter.value]
-    snapshots = [task_snapshot(task) for task in tasks]
+        tasks_list = [t for t in tasks_list if t.get("status") == status_filter.value]
+    if search and search.strip():
+        keyword = search.strip().lower()
+        tasks_list = [
+            t for t in tasks_list
+            if _task_matches_search(t, keyword)
+        ]
+    tasks_list = tasks_list[:limit]
+    snapshots = [task_snapshot(task) for task in tasks_list]
     return ListTasksResponse(tasks=snapshots, total=len(snapshots))
 
 

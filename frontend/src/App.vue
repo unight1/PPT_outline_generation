@@ -70,6 +70,7 @@ const skeletonChapters = ref<Chapter[]>([])
 const outlineDraft = ref<Task['outline'] | null>(null)
 const savingOutline = ref(false)
 const saveMessage = ref('')
+const taskSearch = ref('')
 const regeneratingSlideId = ref<string | null>(null)
 const taskHistory = ref<TaskListItem[]>([])
 const historyLoading = ref(false)
@@ -630,13 +631,18 @@ function syncAnswersFromTask() {
 async function refreshTaskHistory() {
   historyLoading.value = true
   try {
-    const result = await listTasks(8)
+    const result = await listTasks(20, taskSearch.value || undefined)
     taskHistory.value = result.tasks
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '加载历史任务失败'
   } finally {
     historyLoading.value = false
   }
+}
+
+function handleSearchTask(keyword: string) {
+  taskSearch.value = keyword
+  void refreshTaskHistory()
 }
 
 async function openTask(taskId: string) {
@@ -1143,6 +1149,7 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
               @open-task="openTask"
               @delete-task="handleDeleteTask"
               @upload-document="handleUploadDocument"
+              @search-task="handleSearchTask"
             />
           </div>
 
@@ -1394,6 +1401,7 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
                 @refresh-history="refreshTaskHistory"
                 @open-task="openTask"
                 @delete-task="handleDeleteTask"
+                @search-task="handleSearchTask"
                 @upload-document="handleUploadDocument"
               />
             </div>

@@ -16,6 +16,7 @@ const emit = defineEmits<{
   (e: 'refresh-history'): void
   (e: 'upload-document', file: File): void
   (e: 'delete-task', taskId: string): void
+  (e: 'search-task', keyword: string): void
 }>()
 
 function onFileChange(event: Event) {
@@ -50,6 +51,14 @@ const hasAttachments = () => Boolean(props.task?.input?.attachments?.length)
         <button class="link-btn" type="button" :disabled="historyLoading" @click="$emit('refresh-history')">
           刷新
         </button>
+      </div>
+      <div class="search-box">
+        <input
+          class="search-input"
+          type="text"
+          placeholder="搜索任务…"
+          @input="$emit('search-task', ($event.target as HTMLInputElement).value)"
+        />
       </div>
       <div v-if="tasks?.length" class="history-list">
         <button
@@ -284,6 +293,22 @@ const hasAttachments = () => Boolean(props.task?.input?.attachments?.length)
 .delete-btn:hover {
   color: #e04040;
   background: #ffeaea;
+}
+
+.search-box {
+  margin-bottom: 8px;
+}
+.search-input {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #d9dfe8;
+  border-radius: 6px;
+  font-size: 12px;
+  outline: none;
+  box-sizing: border-box;
+}
+.search-input:focus {
+  border-color: #2864d8;
 }
 }
 </style>
