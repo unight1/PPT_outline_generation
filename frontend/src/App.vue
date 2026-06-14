@@ -727,6 +727,27 @@ async function handleLongDocumentFile(event: Event) {
       return
     }
     form.document_text = text
+
+    // Auto-analyze document to suggest topic, audience, notes
+    try {
+      const token = localStorage.getItem('access_token')
+      const resp = await fetch('/api/utils/analyze-document', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ document_text: text.slice(0, 100000) }),
+      })
+      if (resp.ok) {
+        const suggestions = (await resp.json()) as { topic?: string; audience?: string; notes?: string }
+        if (suggestions.topic && !form.topic.trim()) form.topic = suggestions.topic
+        if (suggestions.audience && !form.audience.trim()) form.audience = suggestions.audience
+        if (suggestions.notes && !form.raw_notes.trim()) form.raw_notes = suggestions.notes
+      }
+    } catch {
+      // Silently ignore — form stays as-is
+    }
   } catch (err) {
     errorMessage.value = err instanceof Error ? err.message : '读取文档失败'
     longDocumentFileName.value = ''
