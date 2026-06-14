@@ -19,7 +19,6 @@ import {
   NText,
   NCollapse,
   NCollapseItem,
-  useMessage,
 } from 'naive-ui'
 import type {
   Chapter,
@@ -61,7 +60,6 @@ type SlideGenForm = Omit<GenerateSlidesRequest, 'retrieval_policy'> & {
 }
 
 const view = ref<ViewName>('form')
-const message = useMessage()
 const loggedIn = ref(false)
 const currentUsername = ref('')
 const loading = ref(false)
@@ -515,7 +513,6 @@ async function handleCreateTask() {
     }
 
     view.value = 'status'
-    message.success('任务已创建，请回答问题')
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '创建任务失败'
   } finally {
@@ -533,7 +530,6 @@ async function handleSubmitClarification() {
     task.value = await submitClarification(task.value.task_id, answers)
     syncSkeletonFromTask()
     view.value = 'skeleton'
-    message.success('澄清已提交')
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '提交澄清失败'
   } finally {
@@ -783,7 +779,6 @@ async function handleSaveOutline() {
     task.value = await saveOutline(task.value.task_id, outlineDraft.value)
     outlineDraft.value = cloneOutline(task.value.outline)
     saveMessage.value = '修改已保存。'
-    message.success('修改已保存')
     void refreshTaskHistory()
   } catch (error) {
     errorMessage.value =
@@ -802,7 +797,6 @@ async function handleDeleteTask(taskId: string) {
       view.value = 'form'
     }
     void refreshTaskHistory()
-    message.success('任务已删除')
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '删除失败'
   }
@@ -1029,10 +1023,10 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
 
 
 <template>
-  <n-config-provider :theme-overrides="{ common: { primaryColor: '#2864d8' } }">
+  <LoginView v-if="!loggedIn" @logged-in="handleLoggedIn" />
+  <n-config-provider v-else :theme-overrides="{ common: { primaryColor: '#2864d8' } }">
     <n-message-provider>
-      <LoginView v-if="!loggedIn" @logged-in="handleLoggedIn" />
-      <div v-else class="app-shell">
+      <div class="app-shell">
         <div class="app-topbar">
           <strong class="app-title">PPT Outline</strong>
           <n-steps :current="currentStep" size="small" class="header-steps">
