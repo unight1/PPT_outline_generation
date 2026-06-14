@@ -48,6 +48,7 @@ import { outlineToMarkdown } from './utils/outlineToMarkdown'
 import SlideDeckView from './components/SlideDeckView.vue'
 import GeneratingView from './components/GeneratingView.vue'
 import TaskSidebar from './components/TaskSidebar.vue'
+import LoginView from './components/LoginView.vue'
 
 type ViewName = 'form' | 'status' | 'skeleton' | 'result'
 type SlideGenForm = Omit<GenerateSlidesRequest, 'retrieval_policy'> & {
@@ -55,6 +56,8 @@ type SlideGenForm = Omit<GenerateSlidesRequest, 'retrieval_policy'> & {
 }
 
 const view = ref<ViewName>('form')
+const loggedIn = ref(false)
+const currentUsername = ref('')
 const loading = ref(false)
 const errorMessage = ref('')
 const task = ref<Task | null>(null)
@@ -728,8 +731,31 @@ async function handleUploadDocument(file: File) {
 }
 
 onMounted(() => {
-  void refreshTaskHistory()
+  const token = localStorage.getItem('access_token')
+  if (token) {
+    loggedIn.value = true
+    currentUsername.value = localStorage.getItem('username') || ''
+  }
+  if (loggedIn.value) {
+    void refreshTaskHistory()
+  }
 })
+
+function handleLoggedIn(username: string) {
+  loggedIn.value = true
+  currentUsername.value = username
+  void refreshTaskHistory()
+}
+
+function handleLogout() {
+  localStorage.removeItem('access_token')
+  localStorage.removeItem('username')
+  localStorage.removeItem('role')
+  loggedIn.value = false
+  currentUsername.value = ''
+  view.value = 'form'
+  task.value = null
+}
 
 async function handleSaveOutline() {
   if (!task.value || !outlineDraft.value) return
@@ -952,7 +978,8 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
 
 
 <template>
-  <n-config-provider :theme-overrides="{ common: { primaryColor: '#2864d8' } }">
+  <LoginView v-if="!loggedIn" @logged-in="handleLoggedIn" />
+  <n-config-provider v-else :theme-overrides="{ common: { primaryColor: '#2864d8' } }">
     <n-message-provider>
       <div class="app-shell">
         <div class="app-topbar">
@@ -963,7 +990,11 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
             <n-step title="确认骨架" />
             <n-step title="查看大纲" />
           </n-steps>
-          <n-tag size="small" :bordered="false" type="info">{{ apiModeLabel }}</n-tag>
+          <n-space :size="8" align="center">
+            <n-text depth="3" style="font-size:12px">{{ currentUsername }}</n-text>
+            <n-button text size="small" @click="handleLogout">退出</n-button>
+            <n-tag size="small" :bordered="false" type="info">{{ apiModeLabel }}</n-tag>
+          </n-space>
         </div>
 
         <div class="app-body">

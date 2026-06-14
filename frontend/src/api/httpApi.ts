@@ -53,11 +53,17 @@ async function parseError(response: Response): Promise<never> {
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(init?.headers as Record<string, string> ?? {}),
+  }
+  const token = localStorage.getItem('access_token')
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
   const response = await fetch(url, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
+    headers,
     ...init,
   })
 
@@ -230,4 +236,23 @@ export async function regenerateSlide(
       body: JSON.stringify(request ?? {}),
     },
   )
+}
+
+export interface LoginRequest {
+  username: string
+  password: string
+}
+
+export interface LoginResponse {
+  access_token: string
+  token_type: string
+  username: string
+  role: string
+}
+
+export async function login(payload: LoginRequest): Promise<LoginResponse> {
+  return requestJson<LoginResponse>('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 }

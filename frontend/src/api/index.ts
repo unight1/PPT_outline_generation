@@ -31,4 +31,6 @@ export const regenerateSlide = useMock
   ? mockApi.regenerateSlide
   : httpApi.regenerateSlide
 
+export const login = httpApi.login
+
 export const apiModeLabel = useMock ? 'Mock API' : 'Backend API'
