@@ -1,16 +1,40 @@
 [
-    {
-      "task_id": "eval_001",
-      "topic": "人工智能在医疗领域的应用",
-      "expected_depth": "L2",
-      "constraints": ["必须包含手术机器人案例", "至少 5 页内容"],
-      "priority": "high"
-    },
-    {
-      "task_id": "eval_002",
-      "topic": "未来十年低碳能源趋势",
-      "expected_depth": "L1",
-      "constraints": ["包含风能和太阳能对比"],
-      "priority": "medium"
-    }
-  ]
+  {
+    "task_id": "eval_001",
+    "topic": "人工智能在医疗领域的应用",
+    "expected_depth": "L2",
+    "constraints": [
+      "必须包含手术机器人案例",
+      "至少 5 页内容"
+    ],
+    "priority": "high"
+  },
+  {
+    "task_id": "eval_002",
+    "topic": "未来十年低碳能源趋势",
+    "expected_depth": "L1",
+    "constraints": [
+      "包含风能和太阳能对比"
+    ],
+    "priority": "medium"
+  },
+  {
+    "eval_id": "eval_8ecd6c",
+    "topic": "string",
+    "source_type": "short_topic",
+    "document_text": "string",
+    "expected_depth": "L1",
+    "constraints": [
+      "string"
+    ],
+    "priority": "medium",
+    "status": "pending",
+    "task_id": "string",
+    "score": 1,
+    "evaluator": "string",
+    "evidence_coverage": 100.0,
+    "notes": "string",
+    "created_at": "2026-06-14T08:03:25.238706+00:00",
+    "updated_at": "2026-06-14T08:04:32.677890+00:00"
+  }
+]

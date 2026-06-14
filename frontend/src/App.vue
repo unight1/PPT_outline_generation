@@ -1002,7 +1002,7 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
           </n-space>
         </div>
 
-        <div class="app-body">
+        <div class="app-body" :style="{ overflow: currentPage === 'eval' ? 'auto' : 'hidden' }">
           <!-- Form -->
           <div v-if="view === 'form'" class="workflow-layout">
             <n-card title="创建演示任务" size="small" class="view-card">
@@ -1366,7 +1366,7 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
           </div>
         </div>
 
-        <div class="app-bottombar">
+        <div v-if="currentPage === 'workflow'" class="app-bottombar">
           <div class="footer-hint">
             <n-text v-if="footerHint" depth="3" class="footer-msg">{{ footerHint }}</n-text>
           </div>
