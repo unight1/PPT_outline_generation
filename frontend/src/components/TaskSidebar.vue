@@ -73,8 +73,15 @@ const hasAttachments = () => Boolean(props.task?.input?.attachments?.length)
           <button class="delete-btn" type="button" @click.stop="$emit('delete-task', item.task_id)" title="删除">✕</button>
         </button>
       </div>
-      <p v-else class="hint empty-text">
-        {{ historyLoading ? '正在加载最近任务…' : '暂无历史任务' }}
+      <div v-else-if="historyLoading" class="skeleton-list">
+        <div v-for="n in 3" :key="n" class="skeleton-row">
+          <div class="skeleton-line w-80" />
+          <div class="skeleton-line w-50" />
+        </div>
+      </div>
+      <p v-else class="empty-state">
+        <span class="empty-icon">📋</span>
+        <span class="empty-text">暂无任务，创建第一个吧</span>
       </p>
     </div>
 
@@ -309,6 +316,52 @@ const hasAttachments = () => Boolean(props.task?.input?.attachments?.length)
 }
 .search-input:focus {
   border-color: #2864d8;
+}
+
+.skeleton-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0;
+}
+.skeleton-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f0f3f7;
+}
+.skeleton-line {
+  height: 12px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #e0e4ea 25%, #f0f3f7 50%, #e0e4ea 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+.skeleton-line.w-80 { width: 80%; }
+.skeleton-line.w-50 { width: 50%; }
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 16px 0;
+  color: #a8b0c0;
+  text-align: center;
+}
+.empty-icon {
+  font-size: 28px;
+  opacity: 0.6;
+}
+.empty-text {
+  font-size: 12px;
 }
 }
 </style>
