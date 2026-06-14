@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
@@ -1790,9 +1791,10 @@ def export_task_pptx(task_id: UUID) -> StreamingResponse:
     pptx_bytes = export_outline_to_pptx(outline)
     safe_title = str(outline.get("title") or task_id_str)[:40]
     filename = f"{safe_title}.pptx"
+    encoded_filename = quote(filename)
 
     return StreamingResponse(
         content=iter([pptx_bytes]),
         media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"},
     )
