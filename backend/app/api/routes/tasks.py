@@ -476,6 +476,19 @@ def fetch_tasks_by_status(status: TaskStatus, limit: int = 100) -> list[dict[str
     return tasks[:limit]
 
 
+def delete_task(task_id: str) -> bool:
+    if USE_DB_STORE:
+        task = db_get_task(task_id)
+        if task is None:
+            return False
+        db_save_task({**task, "deleted": True})
+        return True
+    if task_id in TASK_STORE:
+        del TASK_STORE[task_id]
+        return True
+    return False
+
+
 def enqueue_generation(task_id: str) -> Future[None]:
     return GENERATION_EXECUTOR.submit(complete_generation, task_id)
 
@@ -1510,6 +1523,15 @@ def retry_failed_task(task_id: UUID) -> GenerateResponse:
     task["updated_at"] = now_iso()
     persist_task(task)
     return generate_task(task_id=UUID(task_id_str), payload=GenerateTaskRequest(idempotency_key=f"retry-{now_iso()}"))
+
+
+@router.delete("/{task_id:uuid}")
+def delete_task_endpoint(task_id: UUID) -> dict[str, str]:
+    task_id_str = str(task_id)
+    validate_task_id(task_id_str)
+    get_task_or_404(task_id_str)
+    delete_task(task_id_str)
+    return {"deleted": task_id_str}
 
 
 def complete_regenerate_slide(task_id: str, slide_id: str, user_instruction: str | None = None) -> None:

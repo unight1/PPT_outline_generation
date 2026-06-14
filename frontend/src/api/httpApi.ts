@@ -104,6 +104,10 @@ export async function listTasks(limit = 10): Promise<ListTasksResponse> {
   return requestJson<ListTasksResponse>(`/api/tasks?limit=${limit}`)
 }
 
+export async function deleteTask(taskId: string): Promise<void> {
+  await requestJson(`/api/tasks/${taskId}`, { method: 'DELETE' })
+}
+
 export async function uploadTaskDocument(
   taskId: string,
   file: File,

@@ -42,6 +42,7 @@ import {
   updateSkeleton,
   uploadTaskDocument,
   saveOutline,
+  deleteTask,
   apiModeLabel,
 } from './api'
 import { outlineToMarkdown } from './utils/outlineToMarkdown'
@@ -780,6 +781,20 @@ async function handleSaveOutline() {
   }
 }
 
+async function handleDeleteTask(taskId: string) {
+  if (!confirm('确定删除该任务？此操作不可撤销。')) return
+  try {
+    await deleteTask(taskId)
+    if (task.value?.task_id === taskId) {
+      task.value = null
+      view.value = 'form'
+    }
+    void refreshTaskHistory()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '删除失败'
+  }
+}
+
 async function handleGenerateSkeleton() {
   if (!task.value) return
 
@@ -1126,6 +1141,7 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
               show-history
               @refresh-history="refreshTaskHistory"
               @open-task="openTask"
+              @delete-task="handleDeleteTask"
               @upload-document="handleUploadDocument"
             />
           </div>
@@ -1377,6 +1393,7 @@ function handleUpdateSlide(updatedSlide: typeof outlineDraft.value extends { sli
                 show-history
                 @refresh-history="refreshTaskHistory"
                 @open-task="openTask"
+                @delete-task="handleDeleteTask"
                 @upload-document="handleUploadDocument"
               />
             </div>

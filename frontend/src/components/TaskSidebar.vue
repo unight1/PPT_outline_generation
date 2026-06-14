@@ -15,6 +15,7 @@ const emit = defineEmits<{
   (e: 'open-task', taskId: string): void
   (e: 'refresh-history'): void
   (e: 'upload-document', file: File): void
+  (e: 'delete-task', taskId: string): void
 }>()
 
 function onFileChange(event: Event) {
@@ -60,6 +61,7 @@ const hasAttachments = () => Boolean(props.task?.input?.attachments?.length)
         >
           <span class="history-title">{{ taskTitle(item) }}</span>
           <span class="history-meta">{{ statusLabel(item.status) }} · {{ item.updated_at.slice(0, 10) }}</span>
+          <button class="delete-btn" type="button" @click.stop="$emit('delete-task', item.task_id)" title="删除">✕</button>
         </button>
       </div>
       <p v-else class="hint empty-text">
@@ -185,6 +187,7 @@ const hasAttachments = () => Boolean(props.task?.input?.attachments?.length)
   background: #fbfcff;
   text-align: left;
   cursor: pointer;
+  position: relative;
 }
 
 .history-item:hover {
@@ -258,5 +261,29 @@ const hasAttachments = () => Boolean(props.task?.input?.attachments?.length)
 .hint {
   color: #5d6b82;
   font-size: 13px;
+}
+
+.delete-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: #a0a8b8;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.history-item:hover .delete-btn {
+  opacity: 1;
+}
+.delete-btn:hover {
+  color: #e04040;
+  background: #ffeaea;
+}
 }
 </style>
