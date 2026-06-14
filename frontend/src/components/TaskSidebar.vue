@@ -61,17 +61,16 @@ const hasAttachments = () => Boolean(props.task?.input?.attachments?.length)
         />
       </div>
       <div v-if="tasks?.length" class="history-list">
-        <button
+        <div
           v-for="item in tasks"
           :key="item.task_id"
           class="history-item"
-          type="button"
           @click="$emit('open-task', item.task_id)"
         >
           <span class="history-title">{{ taskTitle(item) }}</span>
           <span class="history-meta">{{ statusLabel(item.status) }} · {{ item.updated_at.slice(0, 10) }}</span>
           <button class="delete-btn" type="button" @click.stop="$emit('delete-task', item.task_id)" title="删除">✕</button>
-        </button>
+        </div>
       </div>
       <div v-else-if="historyLoading" class="skeleton-list">
         <div v-for="n in 3" :key="n" class="skeleton-row">
@@ -362,6 +361,5 @@ const hasAttachments = () => Boolean(props.task?.input?.attachments?.length)
 }
 .empty-text {
   font-size: 12px;
-}
 }
 </style>
