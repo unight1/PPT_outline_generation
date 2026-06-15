@@ -43,14 +43,39 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(item)
+    if not normalized.get("eval_id"):
+        task_id = normalized.get("task_id")
+        if isinstance(task_id, str) and task_id.strip():
+            normalized["eval_id"] = task_id.strip()
+        else:
+            normalized["eval_id"] = f"eval_{uuid4().hex[:6]}"
+    normalized.setdefault("source_type", "short_topic")
+    normalized.setdefault("status", "pending")
+    normalized.setdefault("priority", "medium")
+    normalized.setdefault("constraints", [])
+    return normalized
+
+
 def _load_dataset() -> list[dict[str, Any]]:
     path = _EVAL_DATA_DIR / "dataset_v0.json"
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return []
+    if not isinstance(raw, list):
+        return []
+
+    items = [_normalize_item(item) for item in raw if isinstance(item, dict)]
+    needs_save = len(items) != len(raw) or any(
+        not isinstance(item, dict) or not item.get("eval_id") for item in raw
+    )
+    if needs_save:
+        _save_dataset(items)
+    return items
 
 
 def _save_dataset(items: list[dict[str, Any]]) -> None:
@@ -83,6 +108,33 @@ def create_eval_case(payload: EvalCase) -> EvalCase:
     _save_dataset(items)
     logger.info("Eval case created eval_id=%s topic=%s", item["eval_id"], item["topic"])
     return EvalCase(**item)
+
+
+@router.get("/stats/summary")
+def eval_stats_summary() -> dict[str, Any]:
+    items = _load_dataset()
+    total = len(items)
+    scored = [i for i in items if i.get("score") is not None]
+    avg_score = (
+        sum(i["score"] for i in scored) / len(scored) if scored else None
+    )
+    by_priority = {"high": 0, "medium": 0, "low": 0}
+    by_status = {"pending": 0, "generating": 0, "done": 0, "failed": 0}
+    for i in items:
+        p = str(i.get("priority", "medium"))
+        s = str(i.get("status", "pending"))
+        if p in by_priority:
+            by_priority[p] += 1
+        if s in by_status:
+            by_status[s] += 1
+
+    return {
+        "total": total,
+        "scored": len(scored),
+        "average_score": round(avg_score, 2) if avg_score is not None else None,
+        "by_priority": by_priority,
+        "by_status": by_status,
+    }
 
 
 @router.get("/{eval_id}", response_model=EvalCase)
@@ -157,30 +209,3 @@ def score_eval_case(eval_id: str, payload: dict[str, Any]) -> EvalCase:
     items[idx] = item
     _save_dataset(items)
     return EvalCase(**item)
-
-
-@router.get("/stats/summary")
-def eval_stats_summary() -> dict[str, Any]:
-    items = _load_dataset()
-    total = len(items)
-    scored = [i for i in items if i.get("score") is not None]
-    avg_score = (
-        sum(i["score"] for i in scored) / len(scored) if scored else None
-    )
-    by_priority = {"high": 0, "medium": 0, "low": 0}
-    by_status = {"pending": 0, "generating": 0, "done": 0, "failed": 0}
-    for i in items:
-        p = str(i.get("priority", "medium"))
-        s = str(i.get("status", "pending"))
-        if p in by_priority:
-            by_priority[p] += 1
-        if s in by_status:
-            by_status[s] += 1
-
-    return {
-        "total": total,
-        "scored": len(scored),
-        "average_score": round(avg_score, 2) if avg_score is not None else None,
-        "by_priority": by_priority,
-        "by_status": by_status,
-    }

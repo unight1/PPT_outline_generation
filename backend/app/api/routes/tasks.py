@@ -17,6 +17,7 @@ from app.config import settings
 from app.task_store import get_task as db_get_task
 from app.task_store import list_tasks as db_list_tasks
 from app.task_store import list_tasks_by_status as db_list_tasks_by_status
+from app.task_store import delete_task as db_delete_task
 from app.task_store import save_task as db_save_task
 from app.task_store import store_available
 from app.services.clarification import build_clarification_questions, build_fallback_clarification_questions
@@ -495,11 +496,9 @@ def fetch_tasks_by_status(status: TaskStatus, limit: int = 100) -> list[dict[str
 
 def delete_task(task_id: str) -> bool:
     if USE_DB_STORE:
-        task = db_get_task(task_id)
-        if task is None:
+        if db_get_task(task_id) is None:
             return False
-        db_save_task({**task, "deleted": True})
-        return True
+        return db_delete_task(task_id)
     if task_id in TASK_STORE:
         del TASK_STORE[task_id]
         return True

@@ -60,9 +60,18 @@ async function handleDelete(evalId: string) {
   void refresh()
 }
 
+const scoreError = ref('')
+
 async function handleScore(evalId: string, s: number) {
-  await scoreEvalCase(evalId, { score: s })
-  void refresh()
+  if (!evalId || s < 1) return
+  scoreError.value = ''
+  try {
+    await scoreEvalCase(evalId, { score: s })
+    await refresh()
+  } catch (e) {
+    scoreError.value = e instanceof Error ? e.message : '评分保存失败'
+    console.error(e)
+  }
 }
 
 onMounted(() => { void refresh() })
@@ -85,6 +94,8 @@ onMounted(() => { void refresh() })
       <n-gi><n-card size="small"><n-text depth="3">均分</n-text><br/><strong>{{ stats.average_score ?? '-' }}</strong></n-card></n-gi>
       <n-gi><n-card size="small"><n-text depth="3">高优先级</n-text><br/><strong>{{ stats.by_priority?.high ?? 0 }}</strong></n-card></n-gi>
     </n-grid>
+
+    <n-text v-if="scoreError" type="error" style="display:block;margin-bottom:12px">{{ scoreError }}</n-text>
 
     <!-- List -->
     <n-space vertical :size="12">

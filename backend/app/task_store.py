@@ -227,6 +227,19 @@ def list_tasks(limit: int = 200) -> list[dict[str, Any]]:
     return tasks
 
 
+def delete_task(task_id: str) -> bool:
+    engine = get_engine()
+    if engine is None:
+        return False
+    _ensure_table()
+    with engine.begin() as conn:
+        result = conn.execute(
+            text("DELETE FROM tasks WHERE task_id = :task_id"),
+            {"task_id": task_id},
+        )
+    return bool(result.rowcount)
+
+
 def store_available() -> bool:
     # Route layer decides fallback behavior based on this check.
     available = get_engine() is not None
