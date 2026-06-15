@@ -1,63 +1,55 @@
 # PPT 大纲智能生成与内容补全系统
 
-课程项目：Vue 3 + TypeScript 前端，Python（FastAPI）后端，MySQL / Redis（Docker）。
+课程项目：基于 RAG + LLM 的 PPT 内容初稿生成。支持短主题与长文档输入，经澄清、骨架确认、按页检索生成，输出可编辑大纲与证据溯源。
 
-## 你需要先安装
+**技术栈**：Vue 3 + TypeScript + Naive UI · FastAPI · MySQL · Redis · ChromaDB · Tavily
 
-- [Node.js](https://nodejs.org/)（LTS，含 npm）
-- [Python 3.11+](https://www.python.org/downloads/)
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/)（用于 MySQL、Redis）
+## 功能概览
 
-## 一次性准备
+| 模块 | 说明 |
+|------|------|
+| 主流程 | 创建 → 澄清 → 骨架 → 按页生成 → 结果编辑（四步导航） |
+| RAG | L0/L1/L2 检索档位、页级定向检索、证据匹配与低可信标记 |
+| 长文档 | LLM 摘要 enrichment、PDF/文本导入、按页注入文档上下文 |
+| 扩展 | 任务历史/搜索/删除、PPTX 导出、登录门控、评测用例管理（admin） |
 
-### 1. 环境变量
+## 环境要求
 
-在仓库根目录复制示例文件并按需修改：
+- [Node.js](https://nodejs.org/) LTS
+- [Python 3.10+](https://www.python.org/downloads/)（建议 3.10 或 3.11）
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)（MySQL + Redis）
+
+## 快速启动
+
+### 1. 配置环境变量
 
 ```bash
-copy .env.example .env
+copy .env.example .env   # Linux/macOS: cp .env.example .env
 ```
 
-（Linux / macOS：`cp .env.example .env`）
+按需填写 `OPENAI_API_KEY`、`OPENAI_BASE_URL`；启用真实 LLM 时设 `USE_REAL_LLM=true`。
 
-如果你使用校内申请的 DeepSeek-R1-671B 接口，建议在 `.env` 里至少配置：
-
-```bash
-USE_REAL_LLM=true
-LLM_MODEL=deepseek-r1-671b
-OPENAI_API_KEY=my_key
-OPENAI_BASE_URL=<按学校接口文档/助教提供填写>
-```
-
-注意：`OPENAI_API_KEY` 不要提交到 Git。
-
-### 2. 启动数据库（MySQL + Redis）
-
-在仓库根目录执行：
+### 2. 启动数据库
 
 ```bash
 docker compose up -d
 ```
 
-等待健康检查通过。默认端口：`3307`（MySQL）、`6379`（Redis）。
+默认端口：MySQL `3307`，Redis `6379`。
 
-### 3. Python 后端
+### 3. 启动后端
 
 ```bash
 cd backend
 python -m venv .venv
-.\.venv\Scripts\activate
+.\.venv\Scripts\activate          # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-（Linux / macOS：`source .venv/bin/activate`）
+API 文档：[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 
-浏览器打开 [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) 可看到 API 文档。
-
-### 4. 前端
-
-新开一个终端：
+### 4. 启动前端
 
 ```bash
 cd frontend
@@ -65,33 +57,40 @@ npm install
 npm run dev
 ```
 
-浏览器打开终端里提示的地址（一般为 [http://localhost:5173](http://localhost:5173)）。页面会请求 `/api/health`，由 Vite 代理到后端。
+浏览器打开 [http://localhost:5173](http://localhost:5173)。
 
-## 目录说明
+## 登录账号
 
-| 路径 | 说明 |
-|------|------|
-| `backend/app/` | FastAPI 应用：`main.py`、配置、`api/routes/` |
-| `frontend/src/` | Vue 入口与页面 |
-| `docs/` | 项目说明与初步系统设计 |
-| `docker-compose.yml` | 仅数据库与缓存（应用本地运行，便于调试） |
+| 用户 | 密码 | 权限 |
+|------|------|------|
+| `admin` | `admin123` | 主流程 + 评测管理 |
+| `user` | `user123` | 仅主流程 |
 
-## 联调必读
+## 目录结构
 
-- 接口与数据结构契约（v1，新功能）：`docs/api_contract_v1.md`
-- 遗留一次性生成契约（v0）：`docs/api_contract_v0.md`
-- 任务状态流转说明：`docs/management/task_state_flow.md`
+```
+backend/app/          # FastAPI：routes / services / retrieval
+frontend/src/         # Vue 单页应用（App.vue + components/）
+docs/                 # API 契约、状态流转、评测与项目管理文档
+docker-compose.yml    # MySQL + Redis
+```
 
-## 下一步开发建议
+## 文档
 
-- 在 `backend/app/api/routes/` 增加任务、生成等接口
-- 集成 LangGraph / LangChain 时把依赖写入 `backend/requirements.txt`
-- 数据库表可用 SQLAlchemy 迁移（Alembic）逐步添加
+- API 契约（v1）：`docs/api_contract_v1.md`
+- 任务状态流转：`docs/management/task_state_flow.md`
+- 评测指标说明：`docs/evaluation/`
 
 ## 常见问题
 
-**前端显示「请求失败」**  
-先确认后端已在 `8000` 端口运行，且前端用 `npm run dev`（不要只打开 `index.html` 文件）。
+**登录或接口报「请求失败」**  
+确认后端在 `8000` 端口运行，且使用 **venv 内的 Python** 启动 uvicorn（勿混用全局 Python）。
 
-**`/api/health/ready` 里 mysql/redis 为 false**  
-确认 Docker 已启动，且根目录 `.env` 中 `DATABASE_URL`、`REDIS_URL` 与 `docker-compose.yml` 一致。
+**按页生成在 retrieving_page 阶段失败**  
+多为 `transformers` 版本不兼容，在 venv 中执行 `pip install -r requirements.txt` 后重启后端。
+
+**`/api/health/ready` 中 mysql/redis 为 false**  
+检查 Docker 是否启动，`.env` 中 `DATABASE_URL`、`REDIS_URL` 是否与 `docker-compose.yml` 一致。
+
+**首次按页生成较慢**  
+启动时会预热 embedding 模型；也可在 `.env` 设 `RETRIEVAL_WARMUP_ON_STARTUP=false` 推迟到首次请求。
