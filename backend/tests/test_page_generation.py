@@ -1019,3 +1019,75 @@ def test_merge_pages_with_chapters() -> None:
     assert outline["slides"][0]["chapter_id"] == "ch1"
     assert outline["slides"][2]["chapter_id"] == "ch2"
 
+
+# ── R1 edge: HTML tags and numeric noise ──────────────────
+
+
+def test_clean_evidence_preserves_surrounded_text() -> None:
+    result = clean_evidence_snippet("<div>AI市场规模达60亿美元</div>", max_chars=200)
+    assert "AI" in result
+    assert "60" in result
+
+
+def test_clean_evidence_filters_numeric_list() -> None:
+    result = clean_evidence_snippet("1. 2. 3. 4. 5. 6. 7. 8. 9. 10.", max_chars=200)
+    assert result == "" or len(result) < 20
+
+
+def test_clean_evidence_handles_empty_paragraph() -> None:
+    assert clean_evidence_snippet("", max_chars=200) == ""
+    assert clean_evidence_snippet("   ", max_chars=200) == ""
+
+
+# ── R2 edge: empty bullets ──────────────────────────────────
+
+
+def test_match_bullets_empty_array() -> None:
+    result, low = match_bullets_to_evidence([], [{"evidence_id": "ev_1", "snippet": "test", "score": 0.9, "source_id": "s", "locator": "L1"}])
+    assert result == []
+    assert low == 0
+
+
+def test_match_bullets_no_text() -> None:
+    bullets = [{"bullet_id": "b1", "text": "", "evidence_ids": []}]
+    evidence = [{"evidence_id": "ev_1", "snippet": "AI market size", "score": 0.9, "source_id": "s", "locator": "L1"}]
+    result, low = match_bullets_to_evidence(bullets, evidence)
+    assert result[0]["evidence_ids"] == []
+    assert low == 1
+
+
+def test_match_bullets_non_dict_skipped() -> None:
+    bullets = ["not a dict", {"bullet_id": "b1", "text": "AI market", "evidence_ids": []}]
+    evidence = [{"evidence_id": "ev_1", "snippet": "AI market size 60B", "score": 0.9, "source_id": "s", "locator": "L1"}]
+    result, low = match_bullets_to_evidence(bullets, evidence)
+    assert result[1]["evidence_ids"] == ["ev_1"]
+
+
+# ── High-level: merge_pages with LLM evidence_ids ───────────
+
+
+def test_merge_pages_preserves_llm_chosen_evidence_ids() -> None:
+    skeleton = [{"slide_id": "s1", "title": "Test", "intent": "", "user_notes": ""}]
+    page_results = {
+        "s1": {
+            "slide_id": "s1", "title": "Test",
+            "bullets": [
+                {"bullet_id": "s1-b1", "text": "Market size", "evidence_ids": ["ev_2"]},
+                {"bullet_id": "s1-b2", "text": "Architecture", "evidence_ids": []},
+            ],
+            "speaker_notes": "",
+        }
+    }
+    retrieval = {
+        "s1": [
+            {"evidence_id": "ev_1", "snippet": "Architecture uses microservices", "source_id": "tech.md", "locator": "L1", "score": 0.8},
+            {"evidence_id": "ev_2", "snippet": "Market size is 60 billion USD", "source_id": "report.pdf", "locator": "L1", "score": 0.9},
+        ],
+    }
+    outline = merge_pages_to_outline("test", skeleton, page_results, retrieval, "L1")
+    slide = outline["slides"][0]
+    # LLM chose ev_2 for b1 — should be preserved since it's valid
+    assert slide["bullets"][0]["evidence_ids"] == ["ev_2"]
+    # b2 should get matched by the fallback since it has no evidence_ids
+    assert slide["bullets"][1]["evidence_ids"] == ["ev_1"]
+
