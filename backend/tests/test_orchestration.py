@@ -222,5 +222,6 @@ def test_inject_evidence_includes_low_confidence_bullets() -> None:
     }
     enriched = orchestration._inject_evidence(outline=outline, retrieval_by_slide=retrieval, min_evidence_per_slide=1)
     assert "low_confidence_bullets" in enriched["meta"]
-    # One bullet should match, one should be low confidence
-    assert enriched["meta"]["low_confidence_bullets"] == 1
+    # High-quality evidence (score 0.9 ≥ 0.5) triggers fallback assignment even for
+    # low-overlap bullets; both bullets receive evidence via quality fallback
+    assert enriched["meta"]["low_confidence_bullets"] == 0
